@@ -104,17 +104,25 @@ def _transform_object(node: Dict[str, Any]) -> None:
             props[name] = _make_nullable(prop_schema)
 
 def _walk_and_transform(schema: Dict[str, Any]) -> None:
-    def visit(x: Any) -> None:
+    visited = set()  # Prevent infinite recursion
+    
+    def visit(x: Any, path: str = "") -> None:
+        if id(x) in visited:
+            return
+        visited.add(id(x))
+        
         if isinstance(x, dict):
+            # Transform this object if it has properties
             if x.get("type") == "object" and "properties" in x:
                 _transform_object(x)
-            # Recurse into nested structures
-            for key in ("properties", "items", "anyOf", "oneOf", "allOf", "$defs", "definitions"):
-                if key in x:
-                    visit(x[key])
+            
+            # Recursively visit all values
+            for key, value in x.items():
+                visit(value, f"{path}.{key}" if path else key)
         elif isinstance(x, list):
-            for item in x:
-                visit(item)
+            for i, item in enumerate(x):
+                visit(item, f"{path}[{i}]")
+    
     visit(schema)
 
 def build_openai_strict_schema() -> Dict[str, Any]:
@@ -236,15 +244,25 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         out["timezone"] = candidate.get("timezone")
         out["currency"] = candidate.get("currency")
         out["travelers_count"] = candidate.get("travelers_count", req.travelers_count)
-        out["interests"] = candidate.get("interests", req.interests)
+        out["interests"] = candidate.get("interests", req.interests or [])
         out["logistics"] = candidate.get("logistics")
         out["meta"] = candidate.get("meta") or {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
     else:
         out["timezone"] = None
         out["currency"] = None
         out["travelers_count"] = req.travelers_count
-        out["interests"] = req.interests
+        out["interests"] = req.interests or []
         out["logistics"] = None
+        out["meta"] = {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
+
+    # Fill missing or invalid currency and timezone with defaults
+    if not out.get("currency") or not isinstance(out.get("currency"), str):
+        out["currency"] = "EUR"
+    if not out.get("timezone") or not isinstance(out.get("timezone"), str):
+        out["timezone"] = "GMT"
+    
+    # Ensure meta is properly structured
+    if not isinstance(out.get("meta"), dict):
         out["meta"] = {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
 
     # Remove junk keys that don't belong in the response schema
