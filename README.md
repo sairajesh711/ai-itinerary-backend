@@ -1,42 +1,131 @@
 AI Itinerary Crafter
-AI Itinerary Crafter is a product-focused web application that helps travelers create deeply personalized itineraries by acting as a smart "co-pilot" for prompting Large Language Models (LLMs). This project is an exploration of user-centric AI design, focusing on how a guided and interactive UI can unlock the full potential of generative AI for complex, creative tasks like travel planning.
 
-The Product Vision: Your Personal Travel Curator
-Generic AI chats can give you a list of tourist spots. This app helps you build a trip that feels like it was handcrafted for you by a local expert who understands your unique style. We believe the perfect trip isn't just about where you go; it's about the feeling you want to experience. Our app is designed to capture that feeling and turn it into a practical, actionable plan.
+AI Itinerary Crafter is a product-focused web application that helps travelers create deeply personalized itineraries by acting as a smart co-pilot for prompting large language models (LLMs). It explores user-centric AI design: how a guided, interactive UI can unlock the full potential of generative AI for complex, creative tasks like travel planning.
 
-The User Pain Point: The "Blank Canvas" Problem
-Using a powerful AI for travel planning sounds great in theory, but most people face a significant hurdle:
+Product Vision — Your Personal Travel Curator
 
-Prompt Paralysis: Staring at a chat box, users don't know what to ask. "Plan a trip to Paris" yields a generic, boring list of the same top 10 attractions.
+Generic AI chats can hand you a top-10 list. This app helps you shape a trip that feels handcrafted by a local who understands your style. The perfect trip isn’t only where you go—it’s the feeling you want to experience. Our job is to capture that feeling and turn it into a practical, actionable plan you can use.
 
-Lack of Specificity: Users don't realize they need to provide details about their budget, pace, interests, and "vibe" to get a truly personalized result.
+User Problem — The “Blank Canvas” Wall
 
-Generic, Unusable Output: The AI's response is often a dense block of text that's hard to parse and isn't structured like a real, usable itinerary.
+Most travelers struggle to get great output from AI because:
 
-Missing Real-World Context: Standard AI responses don't account for real-time events, opening hours, or local holidays that could impact a trip.
+Prompt paralysis: A blank chat box leads to generic “Plan a trip to Paris” results.
 
-Our Solution: A Guided Conversation, Not a Blank Box
-This app solves the "blank canvas" problem by replacing a single chat box with a fun, interactive, and guided experience. We help you build the perfect prompt without you ever having to think about "prompt engineering."
+Missing specifics: Budget, pace, interests, and “vibe” are rarely captured.
 
-Guided Input Form: Instead of one big question, we ask a series of small, easy ones. "Where are you going?" "When?" "Who are you traveling with?" "What's your daily budget?"
+Unstructured output: Dense text isn’t a usable itinerary.
 
-"Vibe" Selectors: This is the core of the experience. Users can select from a palette of descriptive tags to define their ideal trip, such as:
+Poor real-world context: Typical answers ignore dates, holidays, and opening hours.
 
-Pace: Fast-Paced & Action-Packed vs. Relaxed & Slow
+Our Approach — A Guided Conversation (Not a Blank Box)
+
+We replace the single text box with a friendly, step-by-step journey:
+
+Guided Inputs: Short, easy questions. Where are you going? When? Who’s with you? Daily budget?
+
+Vibe Selectors: Core to the experience—pick descriptors and moods that define your trip.
+
+Pace: Fast-paced & Action-packed ↔ Relaxed & Slow
 
 Interests: Foodie Adventure, Art & History, Hidden Gems, Nightlife, Outdoor & Nature
 
-Style: Luxury & Comfort, Budget-Friendly, Family Fun
+Style: Luxury & Comfort, Budget-Friendly, Family Fun, Solo Explorer
 
-Intelligent Prompt Construction: Behind the scenes, the app takes these structured inputs and masterfully weaves them into a detailed, highly specific prompt designed to get the best possible result from the AI.
+Intelligent Prompt Construction: We stitch your choices into a high-quality prompt that sets the right context for the AI—without you doing any “prompt engineering.”
 
-Structured & Actionable Output: The AI's response is parsed and displayed not as a wall of text, but as a clean, day-by-day timeline with locations, descriptions, and insider tips.
+Structured, Actionable Output: Results are rendered as a clean day-by-day timeline with neighborhoods, movement time, and practical tips—not a wall of text.
+
+Note: The app will send your structured inputs to an AI provider and then parse and present the response in a clear, visual format. Exact implementation details may evolve.
+
+What You Get — From Clicks to a Curated Plan
+
+A trip that reflects your mood and constraints, not a generic checklist.
+
+A timeline you can read at a glance:
+
+Day → Summary → Blocks (e.g., Morning market in Sant Antoni, Gothic Quarter walk, Tapas in El Born)
+
+Each block includes a short description, optional neighborhood, estimated duration, and insider tips.
+
+Effortless iteration: Change the vibe, pace, or budget and regenerate a refined plan.
+
+Edit & share: Tweak details and share a link with friends or family.
 
 Key Features & Design Philosophy
-From Simple Clicks to a Masterpiece Prompt: The user's journey is effortless. They click buttons and select tags, and the app does the expert work of talking to the AI.
 
-Real-Time Event Integration (Future Vision): The generated prompt will include a query for notable local events, festivals, or holidays happening during the user's selected travel dates, adding a layer of timely relevance.
+Guided UI over free-form chat: Reduce cognitive load with small, meaningful choices.
 
-Editable & Shareable Itineraries: The final plan isn't static. Users can edit, add notes, and share a link to their curated itinerary with fellow travelers.
+Vibe-first discovery: Inspire users with combinations (e.g., Slow & Foodie, Outdoors & Hidden Gems).
 
-A Focus on Discovery: The app is designed to help users discover new possibilities. By presenting interesting "vibe" combinations, it can inspire travel ideas users might not have considered on their own.
+Explainability in plain language: The UI clarifies why a suggestion appears (e.g., budget fit, neighborhood clustering).
+
+Mobile-first & accessible: Clear type, high contrast, keyboard-friendly flows, respectful motion.
+
+Graceful fallbacks: If data is uncertain (e.g., seasonal closures), show alternatives or call it out.
+
+Privacy-aware: Only collect what’s needed to generate your plan; keep control with the user.
+
+Scope & Non-Goals (Initial)
+
+In scope (initial):
+
+Guided inputs, vibe selectors, structured itinerary rendering.
+
+Lightweight editing and easy sharing.
+
+Clear disclaimers where real-time info may vary.
+
+Not in scope (initial):
+
+Live bookings, prices, or tickets.
+
+Real-time availability checks or scraping.
+
+Long-term account systems or social feeds.
+
+Success Signals (What “Good” Looks Like)
+
+Time to first plan: < 2 minutes from landing to first itinerary.
+
+Iteration rate: Users meaningfully adjust vibes or constraints and regenerate.
+
+Comprehension: Users report “I know exactly how to use this plan.”
+
+Shareability: Plans are shared with fellow travelers.
+
+Delight: Qualitative feedback mentions “feels like a local planned it.”
+
+Roadmap (Subject to Change)
+
+v0.1 — Vibe & Flow: Guided form, vibe tags, example itineraries, clean rendering.
+
+v0.2 — AI in the Loop: Send structured inputs to the AI; parse and present a usable timeline.
+
+v0.3 — Edit & Share: Inline edits, simple notes, shareable link.
+
+v0.4 — Timely Relevance (Exploratory): Encourage date-aware suggestions (events, holidays), with clear disclaimers.
+
+Content & Voice Guidelines
+
+Tone: Helpful, curious, never prescriptive.
+
+Copy: Short sentences, concrete nouns (“El Raval”, “Can Cisa”), avoid clichés.
+
+Transparency: Call out uncertainty (seasonality, variable hours).
+
+Inclusivity: Offer options for dietary needs, mobility, and family-friendliness.
+
+FAQs
+
+Why not just ask an AI directly?
+Most travelers don’t know which details matter. The guided flow captures those details and translates them into a great prompt so you get a plan that actually fits you.
+
+Will this be accurate to dates and opening hours?
+We’ll encourage date-aware context and highlight uncertainties. The plan is a smart starting point—you remain in control.
+
+Do I need to write prompts?
+No. You make choices; the app does the prompting and formatting.
+
+What about privacy?
+We only collect the info needed to build your plan. You can edit or delete your plan at any time.
