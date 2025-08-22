@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone, date as _date
 from typing import Any, Dict, List, Set
 
@@ -11,9 +12,11 @@ from fastapi import HTTPException
 from openai import OpenAI
 
 from config import settings
-from models import ItineraryRequest, ItineraryResponse, DayPlan
+from models import ItineraryRequest, ItineraryResponse, DayPlan, Meta
+from request_context import get_request_id
+from services.calendar_service import guess_country_code
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger("llm")
 
 # -----------------------------------------------------------------------------
 # Prompts
@@ -31,37 +34,39 @@ Planning rules:
 - Build realistic, logistically sound day plans for Europe.
 - Cluster nearby sights; keep travel times sensible (walk/transit unless user prefers otherwise).
 - If unsure, leave fields null or [] (do not invent confirmations/tickets).
-- Tips should be practical (best hours, booking hints, local gotchas).
+- Output MUST include at least 3 activities per day (morning/afternoon/evening blocks).
+- Include at least one food/coffee stop per day unless explicitly told not to.
+- Use CALENDAR CONTEXT to adjust openings/closures and crowds.
 """
 
-def _user_prompt(req: ItineraryRequest) -> str:
+def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None) -> str:
     end_or_days = (
         f"end_date: {req.end_date.isoformat()}" if req.end_date
         else f"duration_days: {req.duration_days}"
     )
-    return (
-        "Create a day-by-day itinerary with activities and logistics.\n"
-        f"destination: {req.destination}\n"
-        f"start_date: {req.start_date.isoformat()}\n"
-        f"{end_or_days}\n"
-        f"interests: {', '.join(req.interests) if req.interests else 'none'}\n"
-        f"travelers_count: {req.travelers_count}\n"
-        f"budget_level: {req.budget_level}\n"
-        f"pace: {req.pace}\n"
-        f"preferred_transport: {', '.join(req.preferred_transport)}\n"
-        "Constraints:\n"
-        "- Keep transitions time-realistic across morning/afternoon/evening.\n"
-        "- Leave booking fields null unless reasonably certain.\n"
-    )
+    blocks = [
+        "Create a day-by-day itinerary with activities and logistics.",
+        f"destination: {req.destination}",
+        f"start_date: {req.start_date.isoformat()}",
+        end_or_days,
+        f"interests: {', '.join(req.interests) if req.interests else 'none'}",
+        f"travelers_count: {req.travelers_count}",
+        f"budget_level: {req.budget_level}",
+        f"pace: {req.pace}",
+        f"preferred_transport: {', '.join(req.preferred_transport)}",
+        "Constraints:",
+        "- Keep transitions time-realistic across morning/afternoon/evening.",
+        "- Leave booking fields null unless reasonably certain.",
+    ]
+    if calendar_notes:
+        blocks.append("\nCALENDAR CONTEXT:\n" + calendar_notes)
+    return "\n".join(blocks)
 
 def _strip_code_fences(s: str | None) -> str:
     if not s:
         return ""
     t = s.strip()
     if t.startswith("```"):
-        # Remove leading fenced code blocks if any
-        t = t.lstrip("`")
-        # crude but effective: find last fence occurrence
         parts = s.split("```")
         if len(parts) >= 2:
             return "```".join(parts[1:-1]).strip() or parts[1].strip()
@@ -104,31 +109,45 @@ def _transform_object(node: Dict[str, Any]) -> None:
             props[name] = _make_nullable(prop_schema)
 
 def _walk_and_transform(schema: Dict[str, Any]) -> None:
-    visited = set()  # Prevent infinite recursion
-    
-    def visit(x: Any, path: str = "") -> None:
+    visited = set()
+    def visit(x: Any) -> None:
         if id(x) in visited:
             return
         visited.add(id(x))
-        
         if isinstance(x, dict):
-            # Transform this object if it has properties
             if x.get("type") == "object" and "properties" in x:
                 _transform_object(x)
-            
-            # Recursively visit all values
-            for key, value in x.items():
-                visit(value, f"{path}.{key}" if path else key)
+            for v in x.values():
+                visit(v)
         elif isinstance(x, list):
-            for i, item in enumerate(x):
-                visit(item, f"{path}[{i}]")
-    
+            for item in x:
+                visit(item)
+    visit(schema)
+
+def _scrub_unsupported_formats(schema: Dict[str, Any]) -> None:
+    """
+    Remove JSON Schema 'format' values OpenAI doesn't accept (e.g., 'uri').
+    Keep a conservative allowlist (date, date-time, email, uuid).
+    """
+    ALLOWED = {"date", "date-time", "email", "uuid"}
+
+    def visit(x: Any) -> None:
+        if isinstance(x, dict):
+            fmt = x.get("format")
+            if isinstance(fmt, str) and fmt not in ALLOWED:
+                x.pop("format", None)
+            for v in x.values():
+                visit(v)
+        elif isinstance(x, list):
+            for item in x:
+                visit(item)
     visit(schema)
 
 def build_openai_strict_schema() -> Dict[str, Any]:
     base = ItineraryResponse.model_json_schema()
     strict_schema = copy.deepcopy(base)
     _walk_and_transform(strict_schema)
+    _scrub_unsupported_formats(strict_schema)
     return strict_schema
 
 
@@ -219,7 +238,7 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
             continue
         d: Dict[str, Any] = {}
         d["day_index"] = day.get("day_index") or (i + 1)
-        d["date"] = day.get("date") or ( _date.fromisoformat(out["start_date"]) + timedelta(days=i) ).isoformat()
+        d["date"] = day.get("date") or (_date.fromisoformat(out["start_date"]) + timedelta(days=i)).isoformat()
         d["summary"] = day.get("summary")
         d["weather"] = day.get("weather")
         acts = day.get("activities") or []
@@ -239,7 +258,7 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         except Exception:
             out["total_days"] = len(clean_days) or (req.duration_days or 1)
 
-    # Pass-through/construct optional sections
+    # Optional/aux sections pass-through (leave None if absent; we correct later)
     if isinstance(candidate, dict):
         out["timezone"] = candidate.get("timezone")
         out["currency"] = candidate.get("currency")
@@ -255,16 +274,6 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         out["logistics"] = None
         out["meta"] = {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
 
-    # Fill missing or invalid currency and timezone with defaults
-    if not out.get("currency") or not isinstance(out.get("currency"), str):
-        out["currency"] = "EUR"
-    if not out.get("timezone") or not isinstance(out.get("timezone"), str):
-        out["timezone"] = "GMT"
-    
-    # Ensure meta is properly structured
-    if not isinstance(out.get("meta"), dict):
-        out["meta"] = {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
-
     # Remove junk keys that don't belong in the response schema
     for junk in ("itinerary", "budget_level", "pace", "preferred_transport"):
         if junk in out:
@@ -277,7 +286,7 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
 # Public entrypoint
 # -----------------------------------------------------------------------------
 
-def generate_itinerary(req: ItineraryRequest) -> ItineraryResponse:
+def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None) -> ItineraryResponse:
     """
     Try Chat Completions with Structured Outputs (json_schema) using an OpenAI-strict schema.
     Fallback to Chat JSON mode. Normalize output before Pydantic validation.
@@ -286,11 +295,27 @@ def generate_itinerary(req: ItineraryRequest) -> ItineraryResponse:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
 
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
-
     strict_schema = build_openai_strict_schema()
+
+    # currency/timezone helpers
+    cc = guess_country_code(req.destination) or ""
+    CC_TO_CURRENCY = {
+        "GB": "GBP", "IE": "EUR", "FR": "EUR", "PT": "EUR", "ES": "EUR", "DE": "EUR",
+        "IT": "EUR", "NL": "EUR", "BE": "EUR", "AT": "EUR", "CH": "CHF", "DK": "DKK",
+        "SE": "SEK", "NO": "NOK", "PL": "PLN", "CZ": "CZK", "HU": "HUF", "GR": "EUR",
+    }
+    CC_TO_TZ = {
+        "GB": "Europe/London", "IE": "Europe/Dublin", "FR": "Europe/Paris", "PT": "Europe/Lisbon",
+        "ES": "Europe/Madrid", "DE": "Europe/Berlin", "IT": "Europe/Rome", "NL": "Europe/Amsterdam",
+        "BE": "Europe/Brussels", "AT": "Europe/Vienna", "CH": "Europe/Zurich", "DK": "Europe/Copenhagen",
+        "SE": "Europe/Stockholm", "NO": "Europe/Oslo", "PL": "Europe/Warsaw", "CZ": "Europe/Prague",
+        "HU": "Europe/Budapest", "GR": "Europe/Athens",
+    }
 
     # --- Primary: Chat Completions with json_schema (strict) ---
     try:
+        rid = get_request_id()
+        t0 = time.perf_counter()
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=0.3,
@@ -304,24 +329,42 @@ def generate_itinerary(req: ItineraryRequest) -> ItineraryResponse:
             },
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(req)},
+                {"role": "user", "content": _user_prompt(req, calendar_notes)},
             ],
         )
+        dt = int((time.perf_counter() - t0) * 1000)
         content = _strip_code_fences(chat.choices[0].message.content)
+        log.info(
+            "LLM call ok (structured)",
+            extra={
+                "request_id": rid,
+                "model": settings.OPENAI_MODEL,
+                "duration_ms": dt,
+                "output_chars": len(content or ""),
+            },
+        )
         if not content:
             raise RuntimeError("Empty content from chat completion (structured).")
         raw = json.loads(content)
         candidate = normalize_candidate_for_response(req, raw)
         itinerary = ItineraryResponse.model_validate(candidate)
+
+        # finalize meta
+        meta_obj = itinerary.meta or Meta()
+        meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
+
+        # currency/timezone defaults (non-destructive)
+        final_currency = itinerary.currency or CC_TO_CURRENCY.get(cc) or getattr(settings, "DEFAULT_CURRENCY", "EUR")
+        final_tz = itinerary.timezone or CC_TO_TZ.get(cc)
+
         itinerary = itinerary.model_copy(
             update={
-                "meta": {
-                    **(itinerary.meta.model_dump() if itinerary.meta else {}),
-                    "generated_at_iso": datetime.now(timezone.utc).isoformat(),
-                },
-                "currency": itinerary.currency or getattr(settings, "DEFAULT_CURRENCY", "EUR"),
+                "meta": meta_obj,
+                "currency": final_currency,
+                "timezone": final_tz or itinerary.timezone,
             }
         )
+
         # pad/trim days
         desired = itinerary.total_days
         current = len(itinerary.daily_plan)
@@ -339,36 +382,53 @@ def generate_itinerary(req: ItineraryRequest) -> ItineraryResponse:
             itinerary = itinerary.model_copy(update={"daily_plan": itinerary.daily_plan[:desired]})
         return itinerary
 
-    except Exception as e:
-        logger.warning("Chat structured outputs failed, attempting JSON mode fallback: %s", e)
+    except Exception:
+        log.warning("LLM structured failed", extra={"request_id": get_request_id(), "model": settings.OPENAI_MODEL}, exc_info=True)
 
     # --- Fallback: JSON mode ---
     try:
+        rid = get_request_id()
+        t0 = time.perf_counter()
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=0.3,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(req)},
+                {"role": "user", "content": _user_prompt(req, calendar_notes)},
             ],
         )
+        dt = int((time.perf_counter() - t0) * 1000)
         content = _strip_code_fences(chat.choices[0].message.content)
+        log.info(
+            "LLM call ok (json_mode)",
+            extra={
+                "request_id": rid,
+                "model": settings.OPENAI_MODEL,
+                "duration_ms": dt,
+                "output_chars": len(content or ""),
+            },
+        )
         if not content:
             raise RuntimeError("Empty content from chat completion (JSON mode).")
         raw = json.loads(content)
         candidate = normalize_candidate_for_response(req, raw)
         itinerary = ItineraryResponse.model_validate(candidate)
+
+        meta_obj = itinerary.meta or Meta()
+        meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
+
+        final_currency = itinerary.currency or CC_TO_CURRENCY.get(cc) or getattr(settings, "DEFAULT_CURRENCY", "EUR")
+        final_tz = itinerary.timezone or CC_TO_TZ.get(cc)
+
         itinerary = itinerary.model_copy(
             update={
-                "meta": {
-                    **(itinerary.meta.model_dump() if itinerary.meta else {}),
-                    "generated_at_iso": datetime.now(timezone.utc).isoformat(),
-                },
-                "currency": itinerary.currency or getattr(settings, "DEFAULT_CURRENCY", "EUR"),
+                "meta": meta_obj,
+                "currency": final_currency,
+                "timezone": final_tz or itinerary.timezone,
             }
         )
-        # pad/trim
+
         desired = itinerary.total_days
         current = len(itinerary.daily_plan)
         if current < desired:
@@ -385,6 +445,6 @@ def generate_itinerary(req: ItineraryRequest) -> ItineraryResponse:
             itinerary = itinerary.model_copy(update={"daily_plan": itinerary.daily_plan[:desired]})
         return itinerary
 
-    except Exception as e:
-        logger.exception("OpenAI itinerary generation failed: %s", e)
-        raise HTTPException(status_code=502, detail="LLM generation failed") from e
+    except Exception:
+        log.exception("OpenAI itinerary generation failed", extra={"request_id": get_request_id(), "model": settings.OPENAI_MODEL})
+        raise HTTPException(status_code=502, detail="LLM generation failed")
