@@ -5,7 +5,7 @@ import copy
 import json
 import logging
 from datetime import datetime, timedelta, timezone, date as _date
-from typing import Any, Dict, List, Set, Optional
+from typing import Any, Dict, List, Set, Optional, Tuple
 
 from fastapi import HTTPException
 from openai import OpenAI
@@ -17,27 +17,31 @@ from services.calendar_service import guess_country_code
 
 log = logging.getLogger("llm")
 
+# ---------------------------------------------------------------------
+# Prompt: ask the model to compute costs & self-check against the budget
+# ---------------------------------------------------------------------
 SYSTEM_PROMPT = """You are an expert European travel planner.
 
 Return strictly VALID JSON that matches the provided JSON Schema.
 IMPORTANT:
-- The JSON ROOT MUST be the ItineraryResponse object itself (no wrapper keys like "itinerary", "data", or "result").
-- Include every field defined in the schema (fill optional ones with null or empty arrays/objects).
+- The JSON ROOT MUST be the ItineraryResponse object (no wrapper keys).
+- Include every field (fill optional ones with null or empty arrays/objects).
 - No markdown, no prose. JSON only.
 
 Planning rules:
 - Build realistic, logistically sound day plans for Europe.
 - Cluster nearby sights; keep travel times sensible (walk/transit unless user prefers otherwise).
-- If unsure, leave fields null or [] (do not invent confirmations/tickets).
-- Output MUST include at least 3 activities per day (morning/afternoon/evening blocks).
-- Include at least one food/coffee stop per day unless explicitly told not to.
-- Respect max_daily_budget when provided; keep each DAY'S total under that cap (excluding flights/hotel).
+- Include at least 3 activities per day with at least one food/coffee stop.
 - Use CALENDAR CONTEXT to adjust openings/closures and crowds.
+- Costs: For each activity, include `estimated_cost` with either {amount} OR {amount_min, amount_max}.
+- If a max_daily_budget is provided, aim to keep the SUM of that day’s activity `estimated_cost` within the budget.
+- Budget policy: if a day total exceeds the cap by >5%, replace or suggest lower-cost alternatives; if under the cap by >5%, suggest an optional upgrade.
+- Add a short "Budget check: ..." line in each day’s `notes` summarizing the min–max total and whether it's UNDER, WITHIN, or OVER the cap.
 """
 
 def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None) -> str:
     end_or_days = f"end_date: {req.end_date.isoformat()}" if req.end_date else f"duration_days: {req.duration_days}"
-    budget_line = f"max_daily_budget: {req.max_daily_budget}" if getattr(req, "max_daily_budget", None) is not None else "max_daily_budget: (none)"
+    budget_line = f"max_daily_budget: {getattr(req, 'max_daily_budget', None)}"
     blocks = [
         "Create a day-by-day itinerary with activities and logistics.",
         f"destination: {req.destination}",
@@ -52,7 +56,8 @@ def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None) -> st
         "Constraints:",
         "- Keep transitions time-realistic across morning/afternoon/evening.",
         "- Leave booking fields null unless reasonably certain.",
-        "- Use 'estimated_cost' per activity (either amount or min/max).",
+        "- Use 'estimated_cost' per activity (either amount OR min/max).",
+        "- Write a 'Budget check: ...' line in each day’s notes with min–max total and UNDER/WITHIN/OVER verdict.",
     ]
     if calendar_notes:
         blocks.append("\nCALENDAR CONTEXT:\n" + calendar_notes)
@@ -68,7 +73,9 @@ def _strip_code_fences(s: str | None) -> str:
             return parts[1].strip()
     return t
 
-# ---------- schema transform helpers (unchanged) ----------
+# ---------------------------------------------------------------------
+# JSON Schema transform (Pydantic -> OpenAI strict)
+# ---------------------------------------------------------------------
 def _is_nullable(prop_schema: Dict[str, Any]) -> bool:
     if "type" in prop_schema:
         t = prop_schema["type"]
@@ -123,16 +130,16 @@ def _scrub_unsupported_formats(schema: Dict[str, Any]) -> None:
     visit(schema)
 
 def build_openai_strict_schema() -> Dict[str, Any]:
-    from models import ItineraryResponse
     base = ItineraryResponse.model_json_schema()
     strict_schema = copy.deepcopy(base)
     _walk_and_transform(strict_schema)
     _scrub_unsupported_formats(strict_schema)
     return strict_schema
 
-# ---------- normalization helpers ----------
+# ---------------------------------------------------------------------
+# Normalization & Budget Guardrails
+# ---------------------------------------------------------------------
 def _fix_time_str(val: Any) -> Any:
-    """Make odd time strings safe for pydantic (e.g., '24:30' -> '23:59')."""
     if not isinstance(val, str):
         return val
     s = val.strip().lower()
@@ -143,16 +150,14 @@ def _fix_time_str(val: Any) -> Any:
     return val
 
 def _normalize_cost_dict(obj: Any, default_currency: str = "EUR") -> Optional[Dict[str, Any]]:
+    if obj is None:
+        return None
     if not isinstance(obj, dict):
         return None
+    # support {amount} or {amount_min, amount_max}
     if "amount" in obj:
         amt = obj.get("amount")
-        return {
-            "currency": obj.get("currency") or default_currency,
-            "amount_min": amt,
-            "amount_max": amt,
-            "notes": obj.get("notes"),
-        }
+        return {"currency": obj.get("currency") or default_currency, "amount_min": amt, "amount_max": amt, "notes": obj.get("notes")}
     return {
         "currency": obj.get("currency") or default_currency,
         "amount_min": obj.get("amount_min"),
@@ -173,26 +178,79 @@ def _sanitize_activities(activities: Any, default_currency: str = "EUR") -> List
             a2["tags"] = []
         if a2.get("tips") is None:
             a2["tips"] = []
-        # Times: tolerate odd strings
         if "start_time" in a2:
             a2["start_time"] = _fix_time_str(a2["start_time"])
         if "end_time" in a2:
             a2["end_time"] = _fix_time_str(a2["end_time"])
-        # Costs: unify keys and shapes
         raw_cost = a2.pop("estimated_cost", None)
         if raw_cost is None and "cost" in a2:
             raw_cost = a2.pop("cost", None)
-        if raw_cost is not None:
-            a2["estimated_cost"] = _normalize_cost_dict(raw_cost, default_currency=default_currency)
+        a2["estimated_cost"] = _normalize_cost_dict(raw_cost, default_currency=default_currency)
         clean.append(a2)
     return clean
 
 def _unwrap_root(candidate: Any) -> Any:
     if isinstance(candidate, dict) and len(candidate) == 1:
         k = next(iter(candidate.keys()))
-        if k in {"itinerary","plan","data","result"}:
+        if k in {"itinerary", "plan", "data", "result"}:
             return candidate[k]
     return candidate
+
+def _as_num(x: Any) -> Optional[float]:
+    try:
+        if x is None: return None
+        return float(x)
+    except Exception:
+        return None
+
+def _sum_costs(activities: List[Dict[str, Any]]) -> Tuple[float, float]:
+    mn = 0.0
+    mx = 0.0
+    for a in activities:
+        c = a.get("estimated_cost")
+        if not isinstance(c, dict):
+            continue
+        lo = _as_num(c.get("amount_min"))
+        hi = _as_num(c.get("amount_max"))
+        if lo is None and hi is None:
+            continue
+        if lo is None: lo = hi
+        if hi is None: hi = lo
+        mn += max(0.0, lo or 0.0)
+        mx += max(0.0, hi or 0.0)
+    return mn, mx
+
+def _fmt_money(currency: str, lo: float, hi: float) -> str:
+    lo_i = int(round(lo))
+    hi_i = int(round(hi))
+    if lo_i == hi_i:
+        return f"{currency} {lo_i}"
+    return f"{currency} {lo_i}-{hi_i}"
+
+def _apply_budget_guardrails(days: List[Dict[str, Any]], cap: Optional[int], currency: str) -> None:
+    if not cap:
+        return
+    cap_f = float(cap)
+    lo_band = 0.95 * cap_f
+    hi_band = 1.05 * cap_f
+    for d in days:
+        notes = d.get("notes") or []
+        # remove prior budget lines if any (idempotent)
+        notes = [n for n in notes if not (isinstance(n, str) and n.lower().startswith("budget "))]
+        mn, mx = _sum_costs(d.get("activities") or [])
+        verdict = "WITHIN"
+        if mx > hi_band:
+            verdict = "OVER"
+        elif mn < lo_band:
+            verdict = "UNDER"
+        # summary line
+        notes.insert(0, f"Budget summary: { _fmt_money(currency, mn, mx) } vs cap {currency} {int(cap_f)} — {verdict} (±5% rule).")
+        # suggestions
+        if verdict == "OVER":
+            notes.append("Budget suggestion: swap one paid attraction for a free viewpoint/park, pick a casual eatery over fine dining, or reduce bar round count.")
+        elif verdict == "UNDER":
+            notes.append("Budget suggestion: consider an upgrade (guided tour, rooftop view, dessert add-on) while keeping within +5%.")
+        d["notes"] = notes
 
 def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[str, Any]:
     candidate = _unwrap_root(raw)
@@ -217,9 +275,9 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
 
     cc = guess_country_code(out["destination"]) or ""
     CC_TO_CURRENCY = {
-        "GB":"GBP","IE":"EUR","FR":"EUR","PT":"EUR","ES":"EUR","DE":"EUR",
-        "IT":"EUR","NL":"EUR","BE":"EUR","AT":"EUR","CH":"CHF","DK":"DKK",
-        "SE":"SEK","NO":"NOK","PL":"PLN","CZ":"CZK","HU":"HUF","GR":"EUR",
+        "GB": "GBP", "IE": "EUR", "FR": "EUR", "PT": "EUR", "ES": "EUR", "DE": "EUR",
+        "IT": "EUR", "NL": "EUR", "BE": "EUR", "AT": "EUR", "CH": "CHF", "DK": "DKK",
+        "SE": "SEK", "NO": "NOK", "PL": "PLN", "CZ": "CZK", "HU": "HUF", "GR": "EUR",
     }
     default_currency = CC_TO_CURRENCY.get(cc, "EUR")
 
@@ -240,6 +298,10 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         d["activities"] = _sanitize_activities(acts, default_currency=default_currency)
         d["notes"] = day.get("notes") or []
         clean_days.append(d)
+
+    # Apply budget guardrails before validation (so notes are present)
+    _apply_budget_guardrails(clean_days, getattr(req, "max_daily_budget", None), default_currency)
+
     out["daily_plan"] = clean_days
 
     if isinstance(candidate, dict) and "total_days" in candidate:
@@ -267,12 +329,15 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         out["logistics"] = None
         out["meta"] = {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
 
-    for junk in ("itinerary","budget_level","pace","preferred_transport","max_daily_budget"):
+    # Keep response clean
+    for junk in ("itinerary", "budget_level", "pace", "preferred_transport", "max_daily_budget"):
         out.pop(junk, None)
 
     return out
 
-# ---------- public ----------
+# ---------------------------------------------------------------------
+# Public entrypoint with strict + JSON mode fallbacks
+# ---------------------------------------------------------------------
 def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None) -> ItineraryResponse:
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
@@ -281,14 +346,17 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
     strict_schema = build_openai_strict_schema()
     rid = get_request_id()
 
-    # structured
+    # Primary: strict schema
     try:
+        t0 = datetime.now()
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=0.3,
-            response_format={"type": "json_schema", "json_schema": {"name":"ItineraryResponse","schema":strict_schema,"strict":True}},
-            messages=[{"role":"system","content":SYSTEM_PROMPT},
-                      {"role":"user","content":_user_prompt(req, calendar_notes)}],
+            response_format={"type": "json_schema", "json_schema": {"name": "ItineraryResponse", "schema": strict_schema, "strict": True}},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _user_prompt(req, calendar_notes)},
+            ],
         )
         content = _strip_code_fences(chat.choices[0].message.content)
         log.info("LLM call ok (structured)", extra={"request_id": rid, "model": settings.OPENAI_MODEL})
@@ -300,14 +368,16 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
         meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
         itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "EUR"})
 
+        # pad/trim days to total_days
         desired, current = itinerary.total_days, len(itinerary.daily_plan)
         if current < desired:
-            pads = [DayPlan(day_index=i+1+current, date=itinerary.start_date + timedelta(days=current+i),
-                            summary=None, activities=[], notes=[]) for i in range(desired-current)]
+            pads = [DayPlan(day_index=i + 1 + current, date=itinerary.start_date + timedelta(days=current + i),
+                            summary=None, activities=[], notes=[]) for i in range(desired - current)]
             itinerary = itinerary.model_copy(update={"daily_plan": [*itinerary.daily_plan, *pads]})
         elif current > desired:
             itinerary = itinerary.model_copy(update={"daily_plan": itinerary.daily_plan[:desired]})
 
+        # observability
         try:
             total_acts = sum(len(d.activities) for d in itinerary.daily_plan)
             if total_acts == 0:
@@ -320,14 +390,16 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
     except Exception:
         log.warning("LLM structured failed", extra={"request_id": rid}, exc_info=True)
 
-    # fallback JSON mode
+    # Fallback: JSON mode
     try:
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=0.3,
             response_format={"type": "json_object"},
-            messages=[{"role":"system","content":SYSTEM_PROMPT},
-                      {"role":"user","content":_user_prompt(req, calendar_notes)}],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _user_prompt(req, calendar_notes)},
+            ],
         )
         log.info("LLM call ok (json_mode)", extra={"request_id": rid, "model": settings.OPENAI_MODEL})
         content = _strip_code_fences(chat.choices[0].message.content)
@@ -341,8 +413,8 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
 
         desired, current = itinerary.total_days, len(itinerary.daily_plan)
         if current < desired:
-            pads = [DayPlan(day_index=i+1+current, date=itinerary.start_date + timedelta(days=current+i),
-                            summary=None, activities=[], notes=[]) for i in range(desired-current)]
+            pads = [DayPlan(day_index=i + 1 + current, date=itinerary.start_date + timedelta(days=current + i),
+                            summary=None, activities=[], notes=[]) for i in range(desired - current)]
             itinerary = itinerary.model_copy(update={"daily_plan": [*itinerary.daily_plan, *pads]})
         elif current > desired:
             itinerary = itinerary.model_copy(update={"daily_plan": itinerary.daily_plan[:desired]})
