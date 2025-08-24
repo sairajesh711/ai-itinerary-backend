@@ -1,0 +1,16 @@
+# Minimal curated annual events (extend freely)
+- country_code: PT
+  name: Lisbon Marathon
+  month: 10
+  day: 6
+  city: Lisbon
+  category: marathon
+  notes: Expect road closures; book transport ahead.
+
+- country_code: GB
+  name: Notting Hill Carnival
+  month: 8
+  day: 25
+  city: London
+  category: festival
+  notes: Huge crowds; many shops may adjust hours.

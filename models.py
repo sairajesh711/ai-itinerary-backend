@@ -1,32 +1,37 @@
-# models.py
 from __future__ import annotations
 
 from datetime import date, time
 from typing import List, Literal, Optional
-from pydantic import BaseModel, Field, HttpUrl, ConfigDict, field_validator, model_validator, conint, confloat
-
+from pydantic import (
+    BaseModel,
+    Field,
+    HttpUrl,
+    ConfigDict,
+    field_validator,
+    model_validator,
+    conint,
+    confloat,
+    AliasChoices,
+)
 
 # -----------------------------
-# Shared, strongly-typed atoms
+# Shared atoms
 # -----------------------------
 
 class MoneyEstimate(BaseModel):
-    """Cost range for an item/activity. Keep it loose in Phase 1; tighten later with live prices."""
+    """Cost range for an item/activity. Also supports coercion from a simple 'amount'."""
     model_config = ConfigDict(extra="forbid")
     currency: str = Field(default="EUR", description="ISO currency code, e.g. 'EUR', 'GBP'")
     amount_min: Optional[confloat(ge=0)] = Field(default=None)
     amount_max: Optional[confloat(ge=0)] = Field(default=None)
     notes: Optional[str] = None
 
-
 class Coordinates(BaseModel):
     model_config = ConfigDict(extra="forbid")
     lat: confloat(ge=-90, le=90)
     lng: confloat(ge=-180, le=180)
 
-
 class Place(BaseModel):
-    """A concrete place we may visit or travel between."""
     model_config = ConfigDict(extra="forbid")
     name: str
     address: Optional[str] = None
@@ -34,62 +39,47 @@ class Place(BaseModel):
     google_maps_url: Optional[HttpUrl] = None
     website: Optional[HttpUrl] = None
 
-
 class BookingInfo(BaseModel):
-    """Useful for activities needing reservations (museums, tours, restaurants)."""
     model_config = ConfigDict(extra="forbid")
     required: bool = False
-    recommended_timeframe: Optional[str] = Field(
-        default=None, description="e.g., 'book 2–3 days in advance'"
-    )
+    recommended_timeframe: Optional[str] = Field(default=None)
     url: Optional[HttpUrl] = None
     cost: Optional[MoneyEstimate] = None
     confirmation_ref: Optional[str] = None
 
-
 class TravelLeg(BaseModel):
-    """How to get from the previous activity to this one."""
     model_config = ConfigDict(extra="forbid")
-    mode: Literal[
-        "walk", "public_transit", "train", "bus", "car", "bike", "rideshare", "flight", "ferry"
-    ]
+    mode: Literal["walk","public_transit","train","bus","car","bike","rideshare","flight","ferry"]
     distance_km: Optional[confloat(ge=0)] = None
     duration_minutes: Optional[conint(ge=0)] = None
     from_place: Optional[Place] = None
     to_place: Optional[Place] = None
     notes: Optional[str] = None
 
-
 # -----------------------------
-# Request model (from the user)
+# Request
 # -----------------------------
 
 class ItineraryRequest(BaseModel):
-    """
-    The input blueprint the user (or frontend form) sends to create an itinerary.
-    Keep it compact for Phase 1; we can extend in Phase 2/3.
-    """
     model_config = ConfigDict(extra="forbid")
 
-    destination: str = Field(..., description="City/region, e.g., 'Lisbon' or 'Amalfi Coast'")
+    destination: str
     start_date: date
-    # Choose ONE: either specify end_date OR a duration in days
     end_date: Optional[date] = None
-    duration_days: Optional[conint(ge=1, le=30)] = Field(
-        default=None, description="Number of days if end_date not provided"
-    )
+    duration_days: Optional[conint(ge=1, le=30)] = Field(default=None)
 
-    interests: List[str] = Field(
-        default_factory=list,
-        description="Freeform interests, e.g., ['food', 'history', 'photography']",
-    )
-
+    interests: List[str] = Field(default_factory=list)
     travelers_count: Optional[conint(ge=1, le=12)] = 1
-    budget_level: Literal["shoestring", "moderate", "comfortable", "luxury"] = "moderate"
-    pace: Literal["relaxed", "balanced", "packed"] = "balanced"
-    language: Literal["en"] = "en"  # Extend later
-    preferred_transport: List[Literal["walk", "public_transit", "car", "train", "bike", "rideshare"]] = Field(
-        default_factory=lambda: ["walk", "public_transit"]
+    budget_level: Literal["shoestring","moderate","comfortable","luxury"] = "moderate"
+    pace: Literal["relaxed","balanced","packed"] = "balanced"
+    language: Literal["en"] = "en"
+    preferred_transport: List[Literal["walk","public_transit","car","train","bike","rideshare"]] = Field(
+        default_factory=lambda: ["walk","public_transit"]
+    )
+
+    # NEW: per-day cap
+    max_daily_budget: Optional[conint(ge=0)] = Field(
+        default=None, description="Max spend per day; keep under this cap."
     )
 
     @model_validator(mode="after")
@@ -97,64 +87,88 @@ class ItineraryRequest(BaseModel):
         if not self.end_date and not self.duration_days:
             raise ValueError("Provide either end_date or duration_days.")
         if self.end_date and self.duration_days:
-            # Optional: ensure they match
             expected = (self.end_date - self.start_date).days + 1
             if expected != self.duration_days:
-                raise ValueError(
-                    f"end_date implies {expected} days but duration_days={self.duration_days}."
-                )
+                raise ValueError(f"end_date implies {expected} days but duration_days={self.duration_days}.")
         if self.end_date and self.end_date < self.start_date:
             raise ValueError("end_date cannot be before start_date.")
         return self
 
-
 # -----------------------------
-# Response model (to the user)
+# Response
 # -----------------------------
 
 class WeatherSummary(BaseModel):
-    """Placeholder for Phase 2; optional now."""
     model_config = ConfigDict(extra="forbid")
-    summary: Optional[str] = None  # e.g., "Sunny"
+    summary: Optional[str] = None
     high_c: Optional[confloat(ge=-60, le=60)] = None
     low_c: Optional[confloat(ge=-60, le=60)] = None
     precip_chance: Optional[confloat(ge=0, le=1)] = None
 
-
 class Activity(BaseModel):
-    """
-    A single item on the plan. Times are optional in Phase 1 but recommended
-    for realistic logistics once we integrate routing APIs.
-    """
     model_config = ConfigDict(extra="forbid")
 
     title: str
     category: Literal[
-        "sightseeing", "museum", "landmark", "food", "coffee", "bar",
-        "nightlife", "shopping", "nature", "beach", "hike", "experience",
-        "transport", "hotel", "break"
+        "sightseeing","museum","landmark","food","coffee","bar",
+        "nightlife","shopping","nature","beach","hike","experience",
+        "transport","hotel","break"
     ] = "sightseeing"
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     place: Optional[Place] = None
     description: Optional[str] = None
     booking: Optional[BookingInfo] = None
-    cost: Optional[MoneyEstimate] = None
-    travel_from_prev: Optional[TravelLeg] = Field(
-        default=None, description="How you got here from the last activity"
+
+    # Canonical field; accept legacy 'cost' too
+    estimated_cost: Optional[MoneyEstimate] = Field(
+        default=None,
+        validation_alias=AliasChoices("estimated_cost", "cost"),
+        description="Estimated out-of-pocket cost for this activity."
     )
+
+    travel_from_prev: Optional[TravelLeg] = Field(default=None)
     tags: List[str] = Field(default_factory=list)
     tips: List[str] = Field(default_factory=list)
 
+    @field_validator("tags", "tips", mode="before")
+    @classmethod
+    def _none_to_list(cls, v):
+        return [] if v is None else v
+
+    @field_validator("estimated_cost", mode="before")
+    @classmethod
+    def _coerce_cost_shape(cls, v):
+        # Support {'amount': X} OR {'amount_min': A, 'amount_max': B}
+        if v is None:
+            return None
+        if isinstance(v, dict) and "amount" in v:
+            amt = v.get("amount")
+            return {
+                "currency": v.get("currency") or "EUR",
+                "amount_min": amt,
+                "amount_max": amt,
+                "notes": v.get("notes"),
+            }
+        return v
+
     @model_validator(mode="after")
-    def _validate_time_order(self) -> "Activity":
+    def _normalize_time_order(self) -> "Activity":
+        """
+        Be lenient: nightlife often crosses midnight (e.g., 21:00 → 02:00).
+        If end_time <= start_time, treat it as 'crosses midnight':
+          - keep start_time
+          - set end_time=None
+          - add a helpful tip
+        """
         if self.start_time and self.end_time and self.end_time <= self.start_time:
-            raise ValueError("end_time must be after start_time.")
+            tips = list(self.tips or [])
+            tips.append("Ends after midnight; times are approximate.")
+            self.tips = tips
+            self.end_time = None
         return self
 
-
 class DayPlan(BaseModel):
-    """A single day of the itinerary, with ordered activities."""
     model_config = ConfigDict(extra="forbid")
 
     day_index: conint(ge=1)
@@ -164,9 +178,12 @@ class DayPlan(BaseModel):
     activities: List[Activity] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
 
+    @field_validator("activities", "notes", mode="before")
+    @classmethod
+    def _none_to_list(cls, v):
+        return [] if v is None else v
 
 class Logistics(BaseModel):
-    """Trip-level logistics and helpful references."""
     model_config = ConfigDict(extra="forbid")
 
     arrival: Optional[TravelLeg] = None
@@ -175,21 +192,18 @@ class Logistics(BaseModel):
     safety_etiquette: List[str] = Field(default_factory=list)
     map_overview_url: Optional[HttpUrl] = None
 
+    @field_validator("transit_tips", "safety_etiquette", mode="before")
+    @classmethod
+    def _none_to_list(cls, v):
+        return [] if v is None else v
 
 class Meta(BaseModel):
-    """Useful metadata to track generation and schema versions."""
     model_config = ConfigDict(extra="forbid")
-
     schema_version: str = "1.0.0"
-    generated_at_iso: Optional[str] = None  # set at runtime
+    generated_at_iso: Optional[str] = None
     generator: str = "ai_travel_planner@phase1"
 
-
 class ItineraryResponse(BaseModel):
-    """
-    The strictly-typed, predictable JSON the API returns.
-    This is what the LLM will be steered to fill in (via function calling/JSON mode).
-    """
     model_config = ConfigDict(extra="forbid")
 
     destination: str
@@ -205,6 +219,11 @@ class ItineraryResponse(BaseModel):
     daily_plan: List[DayPlan] = Field(default_factory=list)
     logistics: Optional[Logistics] = None
     meta: Meta = Field(default_factory=Meta)
+
+    @field_validator("interests", "daily_plan", mode="before")
+    @classmethod
+    def _none_to_list(cls, v):
+        return [] if v is None else v
 
     @field_validator("total_days")
     @classmethod
