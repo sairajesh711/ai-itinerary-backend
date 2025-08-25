@@ -5,7 +5,7 @@ import copy
 import json
 import logging
 from datetime import datetime, timedelta, timezone, date as _date
-from typing import Any, Dict, List, Set, Optional, Tuple
+from typing import Any, Dict, List, Set, Callable, Optional
 
 from fastapi import HTTPException
 from openai import OpenAI
@@ -395,6 +395,7 @@ def generate_itinerary(
     calendar_notes: str | None = None,
     climate_notes: str | None = None,
     climate_monthly: Optional[Dict[int, Any]] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> ItineraryResponse:
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
@@ -404,7 +405,23 @@ def generate_itinerary(
     rid = get_request_id()
 
     # --- primary: structured ---
+    def p(msg: str) -> None:
+        try:
+            if progress:
+                progress(msg)
+        except Exception:
+            pass
+
+    if not settings.OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
+
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+    strict_schema = build_openai_strict_schema()
+    rid = get_request_id()
+
+    # --- primary: structured ---
     try:
+        p("Calling OpenAI (structured)")
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=0.3,
@@ -414,6 +431,7 @@ def generate_itinerary(
                 {"role": "user", "content": _user_prompt(req, calendar_notes, climate_notes)},
             ],
         )
+        p("OpenAI returned (structured)")
         content = _strip_code_fences(chat.choices[0].message.content)
         log.info("LLM call ok (structured)", extra={"request_id": rid, "model": settings.OPENAI_MODEL})
         raw = json.loads(content)
@@ -440,7 +458,58 @@ def generate_itinerary(
         except Exception:
             pass
 
+        p("Validation complete (structured)")
         return itinerary
+
+    except Exception as e:
+        log.warning("LLM structured failed", extra={"request_id": rid}, exc_info=True)
+        p("Structured failed  trying JSON mode")
+
+    # --- fallback: JSON mode ---
+    try:
+        p("Calling OpenAI (JSON mode)")
+        chat = client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            temperature=0.3,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": _user_prompt(req, calendar_notes, climate_notes)},
+            ],
+        )
+        p("OpenAI returned (JSON mode)")
+        log.info("LLM call ok (json_mode)", extra={"request_id": rid, "model": settings.OPENAI_MODEL})
+        content = _strip_code_fences(chat.choices[0].message.content)
+        raw = json.loads(content)
+        candidate = normalize_candidate_for_response(req, raw, climate_monthly=climate_monthly)
+        itinerary = ItineraryResponse.model_validate(candidate)
+
+        meta_obj = itinerary.meta or Meta()
+        meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
+        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "EUR"})
+
+        desired, current = itinerary.total_days, len(itinerary.daily_plan)
+        if current < desired:
+            pads = [DayPlan(day_index=i + 1 + current, date=itinerary.start_date + timedelta(days=current + i),
+                            summary=None, activities=[], notes=[]) for i in range(desired - current)]
+            itinerary = itinerary.model_copy(update={"daily_plan": [*itinerary.daily_plan, *pads]})
+        elif current > desired:
+            itinerary = itinerary.model_copy(update={"daily_plan": itinerary.daily_plan[:desired]})
+
+        try:
+            total_acts = sum(len(d.activities) for d in itinerary.daily_plan)
+            if total_acts == 0:
+                log.warning("Itinerary has 0 activities after validation", extra={"request_id": rid, "days": len(itinerary.daily_plan), "destination": itinerary.destination})
+        except Exception:
+            pass
+
+        p("Validation complete (JSON mode)")
+        return itinerary
+
+    except Exception as e:
+        log.exception("OpenAI itinerary generation failed", extra={"request_id": rid})
+        p(f"Error: {e}")
+        raise HTTPException(status_code=502, detail="LLM generation failed") from e
 
     except Exception:
         log.warning("LLM structured failed", extra={"request_id": rid}, exc_info=True)

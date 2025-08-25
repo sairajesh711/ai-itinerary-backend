@@ -9,7 +9,10 @@ from services.climate_service import ClimateService
 from datetime import timedelta
 
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.responses import JSONResponse
+from jobs import manager
+from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from logging_config import setup_logging
@@ -28,7 +31,7 @@ app = FastAPI(
     description="Phase 1: MVP itinerary generation with calendar context",
 )
 
-calendar_service = CalendarService()
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -38,6 +41,18 @@ async def on_startup():
         "env": getattr(settings, "app_env", "development"),
         "debug": getattr(settings, "debug", False),
     })
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=settings.CORS_ALLOW_METHODS,
+    allow_headers=settings.CORS_ALLOW_HEADERS,
+    expose_headers=settings.CORS_EXPOSE_HEADERS,
+    max_age=settings.CORS_MAX_AGE,
+)
+
+
 
 @app.middleware("http")
 async def request_logging_mw(request: Request, call_next):
@@ -49,17 +64,21 @@ async def request_logging_mw(request: Request, call_next):
         return response
     finally:
         dur_ms = int((time.perf_counter() - start) * 1000)
-        status = getattr(response, "status_code", 500) if response is not None else 500
-        if response is not None:
-            try:
+        # attach header for traceability and expose via CORS_EXPOSE_HEADERS
+        try:
+            if response is not None:
                 response.headers["X-Request-Id"] = rid
-            except Exception:
-                pass
+        except Exception:
+            pass
         log.info(
-            "%s %s -> %s in %dms",
-            request.method, request.url.path, status, dur_ms,
-            extra={"request_id": rid, "path": request.url.path, "method": request.method,
-                   "status": status, "duration_ms": dur_ms}
+            f"{request.method} {request.url.path} -> {getattr(response, 'status_code', '?')} in {dur_ms}ms",
+            extra={
+                "request_id": rid,
+                "path": request.url.path,
+                "method": request.method,
+                "status": getattr(response, "status_code", None),
+                "duration_ms": dur_ms,
+            },
         )
 
 @app.get("/health")
@@ -70,6 +89,7 @@ def health():
 
 climate_service = ClimateService()
 calendar_service = CalendarService()
+
 
 @app.post("/generate_itinerary", response_model=ItineraryResponse)
 def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
@@ -93,3 +113,43 @@ def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
     )
 
     return generate_itinerary(req, calendar_notes=calendar_notes, climate_notes=climate_notes, climate_monthly=climate_monthly)
+
+
+# --- JOB ENDPOINTS ---
+@app.post("/jobs/itinerary")
+def create_itinerary_job(req: ItineraryRequest):
+    end_date = req.end_date or (req.start_date + timedelta(days=(req.duration_days or 1) - 1))
+    calendar_notes = calendar_service.build_calendar_context(
+        destination=req.destination,
+        start=req.start_date,
+        end=end_date,
+        country_code_hint=None,
+    )
+
+    job = manager.create(
+        target=generate_itinerary,
+        kwargs={"req": req, "calendar_notes": calendar_notes},
+    )
+    return {"job_id": job.id, "status": job.status}
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    payload = {
+        "id": job.id,
+        "status": job.status,
+        "steps": job.steps,
+        "updated_at": job.updated_at,
+    }
+    if job.status == "done":
+        try:
+            payload["result"] = job.result.model_dump(mode="json")
+        except Exception:
+            payload["result"] = job.result
+    if job.status == "error":
+        payload["error"] = job.error
+    return JSONResponse(payload)
