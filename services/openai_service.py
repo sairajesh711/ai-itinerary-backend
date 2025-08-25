@@ -11,15 +11,12 @@ from fastapi import HTTPException
 from openai import OpenAI
 
 from config import settings
-from models import ItineraryRequest, ItineraryResponse, DayPlan, Meta
+from models import ItineraryRequest, ItineraryResponse, DayPlan, Meta, WeatherSummary
 from request_context import get_request_id
 from services.calendar_service import guess_country_code
 
 log = logging.getLogger("llm")
 
-# ---------------------------------------------------------------------
-# Prompt: ask the model to compute costs & self-check against the budget
-# ---------------------------------------------------------------------
 SYSTEM_PROMPT = """You are an expert European travel planner.
 
 Return strictly VALID JSON that matches the provided JSON Schema.
@@ -28,18 +25,21 @@ IMPORTANT:
 - Include every field (fill optional ones with null or empty arrays/objects).
 - No markdown, no prose. JSON only.
 
+Tone & personalization:
+- Write day `summary` and `tips` in second person ("you"), and reflect the user's stated interests explicitly.
+- Avoid generic phrases; mention the actual neighborhood, venue, or interest.
+
 Planning rules:
-- Build realistic, logistically sound day plans for Europe.
-- Cluster nearby sights; keep travel times sensible (walk/transit unless user prefers otherwise).
-- Include at least 3 activities per day with at least one food/coffee stop.
+- Build realistic, logistically sound day plans; cluster nearby sights; sensible travel times.
+- Include ≥3 activities per day with at least one food/coffee stop.
 - Use CALENDAR CONTEXT to adjust openings/closures and crowds.
+- Use SEASONAL CLIMATE CONTEXT to add one 'Weather tip (Month): ...' line in each day’s notes (do NOT invent a forecast).
 - Costs: For each activity, include `estimated_cost` with either {amount} OR {amount_min, amount_max}.
-- If a max_daily_budget is provided, aim to keep the SUM of that day’s activity `estimated_cost` within the budget.
-- Budget policy: if a day total exceeds the cap by >5%, replace or suggest lower-cost alternatives; if under the cap by >5%, suggest an optional upgrade.
-- Add a short "Budget check: ..." line in each day’s `notes` summarizing the min–max total and whether it's UNDER, WITHIN, or OVER the cap.
+- If a max_daily_budget is provided, keep the day total within ±5% of the cap, and write a 'Budget summary: ...' line in day notes (UNDER/WITHIN/OVER).
+- Public transport: respect preferred_transport. If `public_transit` is allowed, add a short, stable route hint in `travel_from_prev.notes` (e.g., "Metro Line 1 from X to Y, ~12m"). Avoid live schedules; keep it coarse but useful.
 """
 
-def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None) -> str:
+def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None, climate_notes: str | None = None) -> str:
     end_or_days = f"end_date: {req.end_date.isoformat()}" if req.end_date else f"duration_days: {req.duration_days}"
     budget_line = f"max_daily_budget: {getattr(req, 'max_daily_budget', None)}"
     blocks = [
@@ -57,10 +57,14 @@ def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None) -> st
         "- Keep transitions time-realistic across morning/afternoon/evening.",
         "- Leave booking fields null unless reasonably certain.",
         "- Use 'estimated_cost' per activity (either amount OR min/max).",
-        "- Write a 'Budget check: ...' line in each day’s notes with min–max total and UNDER/WITHIN/OVER verdict.",
+        "- Add public-transit hints in travel_from_prev.notes when appropriate.",
+        "- Add one 'Weather tip (Month): ...' line in each day’s notes based on climate, not forecast.",
+        "- Write a 'Budget summary: ...' line in each day’s notes (±5% rule).",
     ]
     if calendar_notes:
         blocks.append("\nCALENDAR CONTEXT:\n" + calendar_notes)
+    if climate_notes:
+        blocks.append("\nSEASONAL CLIMATE CONTEXT:\n" + climate_notes)
     return "\n".join(blocks)
 
 def _strip_code_fences(s: str | None) -> str:
@@ -73,9 +77,7 @@ def _strip_code_fences(s: str | None) -> str:
             return parts[1].strip()
     return t
 
-# ---------------------------------------------------------------------
-# JSON Schema transform (Pydantic -> OpenAI strict)
-# ---------------------------------------------------------------------
+# ---------- schema transform helpers (same as before) ----------
 def _is_nullable(prop_schema: Dict[str, Any]) -> bool:
     if "type" in prop_schema:
         t = prop_schema["type"]
@@ -130,15 +132,14 @@ def _scrub_unsupported_formats(schema: Dict[str, Any]) -> None:
     visit(schema)
 
 def build_openai_strict_schema() -> Dict[str, Any]:
+    from models import ItineraryResponse  # local import to avoid cycles on reload
     base = ItineraryResponse.model_json_schema()
     strict_schema = copy.deepcopy(base)
     _walk_and_transform(strict_schema)
     _scrub_unsupported_formats(strict_schema)
     return strict_schema
 
-# ---------------------------------------------------------------------
-# Normalization & Budget Guardrails
-# ---------------------------------------------------------------------
+# ---------- normalization + budget + weather injection ----------
 def _fix_time_str(val: Any) -> Any:
     if not isinstance(val, str):
         return val
@@ -154,7 +155,6 @@ def _normalize_cost_dict(obj: Any, default_currency: str = "EUR") -> Optional[Di
         return None
     if not isinstance(obj, dict):
         return None
-    # support {amount} or {amount_min, amount_max}
     if "amount" in obj:
         amt = obj.get("amount")
         return {"currency": obj.get("currency") or default_currency, "amount_min": amt, "amount_max": amt, "notes": obj.get("notes")}
@@ -235,7 +235,6 @@ def _apply_budget_guardrails(days: List[Dict[str, Any]], cap: Optional[int], cur
     hi_band = 1.05 * cap_f
     for d in days:
         notes = d.get("notes") or []
-        # remove prior budget lines if any (idempotent)
         notes = [n for n in notes if not (isinstance(n, str) and n.lower().startswith("budget "))]
         mn, mx = _sum_costs(d.get("activities") or [])
         verdict = "WITHIN"
@@ -243,16 +242,71 @@ def _apply_budget_guardrails(days: List[Dict[str, Any]], cap: Optional[int], cur
             verdict = "OVER"
         elif mn < lo_band:
             verdict = "UNDER"
-        # summary line
         notes.insert(0, f"Budget summary: { _fmt_money(currency, mn, mx) } vs cap {currency} {int(cap_f)} — {verdict} (±5% rule).")
-        # suggestions
         if verdict == "OVER":
             notes.append("Budget suggestion: swap one paid attraction for a free viewpoint/park, pick a casual eatery over fine dining, or reduce bar round count.")
         elif verdict == "UNDER":
             notes.append("Budget suggestion: consider an upgrade (guided tour, rooftop view, dessert add-on) while keeping within +5%.")
         d["notes"] = notes
 
-def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[str, Any]:
+def _days_in_month(y: int, m: int) -> int:
+    if m == 12:
+        nxt = _date(y+1, 1, 1)
+    else:
+        nxt = _date(y, m+1, 1)
+    cur = _date(y, m, 1)
+    return (nxt - cur).days
+
+def _inject_weather(days: List[Dict[str, Any]], climate_monthly: Optional[Dict[int, Any]]) -> None:
+    """
+    If the model didn't fill day.weather or weather tips, inject seasonal info.
+    `climate_monthly` is a map {month -> MonthlyClimate-like object}.
+    """
+    if not climate_monthly:
+        return
+    for d in days:
+        try:
+            dt = _date.fromisoformat(d["date"])
+        except Exception:
+            continue
+        mc = climate_monthly.get(dt.month)
+        if not mc:
+            continue
+
+        # Fill day.weather if null
+        w = d.get("weather")
+        if not isinstance(w, dict):
+            w = {}
+        # Summary is high-level, avoid "forecast"
+        w.setdefault("summary", f"Seasonal averages for {dt.strftime('%B')}")
+        if mc.tmax_c is not None:
+            w.setdefault("high_c", float(mc.tmax_c))
+        if mc.tmin_c is not None:
+            w.setdefault("low_c", float(mc.tmin_c))
+        # crude precip probability proxy = precip_days / days_in_month
+        if mc.precip_days is not None:
+            p = max(0.0, min(1.0, float(mc.precip_days) / float(_days_in_month(dt.year, dt.month))))
+            w.setdefault("precip_chance", round(p, 2))
+        d["weather"] = w
+
+        # Ensure a weather tip line exists in notes
+        notes = d.get("notes") or []
+        tip_prefix = "Weather tip"
+        has_tip = any(isinstance(n, str) and n.lower().startswith("weather tip") for n in notes)
+        if not has_tip:
+            parts = []
+            if mc.tmax_c is not None and mc.tmin_c is not None:
+                parts.append(f"avg {int(round(mc.tmax_c))}°C/{int(round(mc.tmin_c))}°C")
+            elif mc.tmax_c is not None:
+                parts.append(f"avg high {int(round(mc.tmax_c))}°C")
+            if mc.precip_days is not None:
+                parts.append(f"~{int(round(mc.precip_days))} rainy day(s)")
+            hint = "pack light layers and a compact umbrella" if (mc.precip_days or 0) >= 5 else "bring a light layer for evenings"
+            month_name = dt.strftime("%B")
+            notes.append(f"Weather tip ({month_name}): {', '.join(parts)} — {hint}.")
+            d["notes"] = notes
+
+def normalize_candidate_for_response(req: ItineraryRequest, raw: Any, climate_monthly: Optional[Dict[int, Any]] = None) -> Dict[str, Any]:
     candidate = _unwrap_root(raw)
     expected_end = req.end_date or (req.start_date + timedelta(days=(req.duration_days or 1) - 1))
     out: Dict[str, Any] = {}
@@ -299,9 +353,11 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         d["notes"] = day.get("notes") or []
         clean_days.append(d)
 
-    # Apply budget guardrails before validation (so notes are present)
-    _apply_budget_guardrails(clean_days, getattr(req, "max_daily_budget", None), default_currency)
+    # Inject climate-based weather + tips if missing
+    _inject_weather(clean_days, climate_monthly)
 
+    # Budget guardrails
+    _apply_budget_guardrails(clean_days, getattr(req, "max_daily_budget", None), default_currency)
     out["daily_plan"] = clean_days
 
     if isinstance(candidate, dict) and "total_days" in candidate:
@@ -329,16 +385,17 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any) -> Dict[st
         out["logistics"] = None
         out["meta"] = {"schema_version": "1.0.0", "generator": "ai_travel_planner@phase1"}
 
-    # Keep response clean
     for junk in ("itinerary", "budget_level", "pace", "preferred_transport", "max_daily_budget"):
         out.pop(junk, None)
 
     return out
 
-# ---------------------------------------------------------------------
-# Public entrypoint with strict + JSON mode fallbacks
-# ---------------------------------------------------------------------
-def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None) -> ItineraryResponse:
+def generate_itinerary(
+    req: ItineraryRequest,
+    calendar_notes: str | None = None,
+    climate_notes: str | None = None,
+    climate_monthly: Optional[Dict[int, Any]] = None,
+) -> ItineraryResponse:
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
 
@@ -346,29 +403,27 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
     strict_schema = build_openai_strict_schema()
     rid = get_request_id()
 
-    # Primary: strict schema
+    # --- primary: structured ---
     try:
-        t0 = datetime.now()
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             temperature=0.3,
             response_format={"type": "json_schema", "json_schema": {"name": "ItineraryResponse", "schema": strict_schema, "strict": True}},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(req, calendar_notes)},
+                {"role": "user", "content": _user_prompt(req, calendar_notes, climate_notes)},
             ],
         )
         content = _strip_code_fences(chat.choices[0].message.content)
         log.info("LLM call ok (structured)", extra={"request_id": rid, "model": settings.OPENAI_MODEL})
         raw = json.loads(content)
-        candidate = normalize_candidate_for_response(req, raw)
+        candidate = normalize_candidate_for_response(req, raw, climate_monthly=climate_monthly)
         itinerary = ItineraryResponse.model_validate(candidate)
 
         meta_obj = itinerary.meta or Meta()
         meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
         itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "EUR"})
 
-        # pad/trim days to total_days
         desired, current = itinerary.total_days, len(itinerary.daily_plan)
         if current < desired:
             pads = [DayPlan(day_index=i + 1 + current, date=itinerary.start_date + timedelta(days=current + i),
@@ -390,7 +445,7 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
     except Exception:
         log.warning("LLM structured failed", extra={"request_id": rid}, exc_info=True)
 
-    # Fallback: JSON mode
+    # --- fallback: JSON mode ---
     try:
         chat = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
@@ -398,13 +453,13 @@ def generate_itinerary(req: ItineraryRequest, calendar_notes: str | None = None)
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _user_prompt(req, calendar_notes)},
+                {"role": "user", "content": _user_prompt(req, calendar_notes, climate_notes)},
             ],
         )
         log.info("LLM call ok (json_mode)", extra={"request_id": rid, "model": settings.OPENAI_MODEL})
         content = _strip_code_fences(chat.choices[0].message.content)
         raw = json.loads(content)
-        candidate = normalize_candidate_for_response(req, raw)
+        candidate = normalize_candidate_for_response(req, raw, climate_monthly=climate_monthly)
         itinerary = ItineraryResponse.model_validate(candidate)
 
         meta_obj = itinerary.meta or Meta()

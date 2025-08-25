@@ -5,6 +5,10 @@ import logging
 import time
 from datetime import timedelta
 
+from services.climate_service import ClimateService
+from datetime import timedelta
+
+
 from fastapi import FastAPI, Request, Response
 
 from config import settings
@@ -63,24 +67,29 @@ def health():
     has_key = bool(settings.OPENAI_API_KEY)
     return {"status": "ok", "openai_key_loaded": has_key, "model": settings.OPENAI_MODEL}
 
+
+climate_service = ClimateService()
+calendar_service = CalendarService()
+
 @app.post("/generate_itinerary", response_model=ItineraryResponse)
 def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
     end_date = req.end_date or (req.start_date + timedelta(days=(req.duration_days or 1) - 1))
+
     calendar_notes = calendar_service.build_calendar_context(
         destination=req.destination,
         start=req.start_date,
         end=end_date,
         country_code_hint=None,
     )
-    log.info(
-        "generate_itinerary request",
-        extra={
-            "request_id": get_request_id(),
-            "destination": req.destination,
-            "start": req.start_date.isoformat(),
-            "end": end_date.isoformat(),
-            "calendar_len": len(calendar_notes or ""),
-            "max_daily_budget": getattr(req, "max_daily_budget", None),
-        },
+    climate_notes = climate_service.build_climate_context(
+        destination=req.destination,
+        start=req.start_date,
+        end=end_date,
     )
-    return generate_itinerary(req, calendar_notes=calendar_notes)
+    climate_monthly = climate_service.monthly_map_for_range(
+        destination=req.destination,
+        start=req.start_date,
+        end=end_date,
+    )
+
+    return generate_itinerary(req, calendar_notes=calendar_notes, climate_notes=climate_notes, climate_monthly=climate_monthly)
