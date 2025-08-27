@@ -513,19 +513,29 @@ def generate_itinerary(
             pass
 
         p("Validation complete (structured)")
+        log.info("OpenAI structured response validated", extra={"request_id": rid, "days": len(itinerary.daily_plan), "activities_total": sum(len(d.activities) for d in itinerary.daily_plan)})
         
         # Apply budget annotations using currency conversion
-        try:
-            currency_svc = CurrencyService()
-            itinerary = annotate_budget(
-                itinerary,
-                home_currency=req.home_currency,
-                max_daily_budget=req.max_daily_budget,
-                currency_svc=currency_svc
-            )
-        except Exception as e:
-            log.warning("Budget annotation failed: %s", e, extra={"request_id": rid})
+        if req.home_currency and req.max_daily_budget:
+            p("Starting budget annotation")
+            log.info("Starting budget annotation", extra={"request_id": rid, "home_currency": req.home_currency, "max_daily_budget": req.max_daily_budget, "local_currency": itinerary.currency})
+            try:
+                currency_svc = CurrencyService()
+                itinerary = annotate_budget(
+                    itinerary,
+                    home_currency=req.home_currency,
+                    max_daily_budget=req.max_daily_budget,
+                    currency_svc=currency_svc
+                )
+                p("Budget annotation complete")
+                log.info("Budget annotation completed successfully", extra={"request_id": rid})
+            except Exception as e:
+                p("Budget annotation failed")
+                log.warning("Budget annotation failed: %s", e, extra={"request_id": rid})
+        else:
+            log.info("Skipping budget annotation - no home_currency or max_daily_budget", extra={"request_id": rid, "home_currency": req.home_currency, "max_daily_budget": req.max_daily_budget})
         
+        log.info("Itinerary generation completed", extra={"request_id": rid, "destination": itinerary.destination, "days": len(itinerary.daily_plan)})
         return itinerary
 
     except Exception as e:

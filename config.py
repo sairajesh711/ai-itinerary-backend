@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # --- CORS (env-driven) ---
     CORS_ALLOW_ORIGINS: List[str] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://localhost:5174"],
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "cors_allow_origins"),
     )
     # Optional comma-separated alternative that overrides the above

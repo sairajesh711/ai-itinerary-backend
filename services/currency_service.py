@@ -85,8 +85,24 @@ class CurrencyService:
 
     def convert(self, amount: Decimal, base: str, quote: str) -> Decimal:
         """Convert amount from base currency to quote currency."""
+        log.info("Currency conversion requested", extra={
+            "amount": float(amount),
+            "from_currency": base,
+            "to_currency": quote
+        })
+        
         rate = self.get_rate(base, quote)
-        return (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        converted = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        
+        log.info("Currency conversion completed", extra={
+            "amount": float(amount),
+            "from_currency": base,
+            "to_currency": quote,
+            "rate": float(rate),
+            "converted_amount": float(converted)
+        })
+        
+        return converted
 
     def convert_float(self, amount: float, base: str, quote: str) -> float:
         """Convenience method for float conversion."""

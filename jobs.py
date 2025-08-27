@@ -39,20 +39,28 @@ class JobManager:
         job = Job(id=uuid.uuid4().hex[:12])
         with self._lock:
             self._jobs[job.id] = job
+        
+        log.info("Job created", extra={"job_id": job.id, "target": target.__name__, "args_count": len(args), "kwargs_keys": list(kwargs.keys())})
 
         progress = self._progress_for(job)
 
         def runner():
+            log.info("Job runner starting", extra={"job_id": job.id})
             job.status = "running"
             progress("Job started")
             self._pool.acquire()
             try:
+                log.info("Job executing target function", extra={"job_id": job.id, "function": target.__name__})
                 res = target(*args, **{**kwargs, "progress": progress})
+                log.info("Job target function completed", extra={"job_id": job.id, "result_type": type(res).__name__})
+                
                 with self._lock:
                     job.result = res
                     job.status = "done"
                     job.updated_at = datetime.now(timezone.utc).isoformat()
                 progress("Job finished")
+                log.info("Job completed successfully", extra={"job_id": job.id})
+                
             except Exception as e:
                 log.exception("Job %s failed", job.id)
                 with self._lock:
@@ -60,6 +68,7 @@ class JobManager:
                     job.status = "error"
                     job.updated_at = datetime.now(timezone.utc).isoformat()
                 progress(f"Error: {e}")
+                log.error("Job failed with error", extra={"job_id": job.id, "error": str(e)})
             finally:
                 self._pool.release()
 

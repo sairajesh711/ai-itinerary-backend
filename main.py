@@ -86,6 +86,10 @@ def health():
     has_key = bool(settings.OPENAI_API_KEY)
     return {"status": "ok", "openai_key_loaded": has_key, "model": settings.OPENAI_MODEL}
 
+@app.get("/debug/cors")
+def debug_cors():
+    return {"cors_origins": settings.CORS_ALLOW_ORIGINS, "frontend_origins": settings.FRONTEND_ORIGINS}
+
 
 climate_service = ClimateService()
 calendar_service = CalendarService()
@@ -124,13 +128,36 @@ def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
 # --- JOB ENDPOINTS ---
 @app.post("/jobs/itinerary")
 def create_itinerary_job(req: ItineraryRequest):
+    log.info("Itinerary job request received", extra={
+        "destination": req.destination,
+        "start_date": str(req.start_date),
+        "duration_days": req.duration_days,
+        "budget_level": req.budget_level,
+        "home_currency": req.home_currency,
+        "max_daily_budget": req.max_daily_budget,
+        "travelers_count": req.travelers_count
+    })
+    
     calendar_notes, climate_notes, climate_monthly = build_context_data(req)
+    
+    log.info("Context data built", extra={
+        "calendar_notes_length": len(calendar_notes) if calendar_notes else 0,
+        "climate_notes_length": len(climate_notes) if climate_notes else 0,
+        "climate_months_count": len(climate_monthly) if climate_monthly else 0
+    })
     
     job = manager.create(
         target=generate_itinerary,
         kwargs={"req": req, "calendar_notes": calendar_notes, 
                 "climate_notes": climate_notes, "climate_monthly": climate_monthly},
     )
+    
+    log.info("Job created successfully", extra={
+        "job_id": job.id,
+        "status": job.status,
+        "destination": req.destination
+    })
+    
     return {"job_id": job.id, "status": job.status}
 
 
@@ -138,7 +165,15 @@ def create_itinerary_job(req: ItineraryRequest):
 def get_job(job_id: str):
     job = manager.get(job_id)
     if not job:
+        log.warning("Job not found", extra={"job_id": job_id})
         raise HTTPException(status_code=404, detail="job not found")
+
+    log.info("Job status requested", extra={
+        "job_id": job_id,
+        "status": job.status,
+        "steps_count": len(job.steps),
+        "last_updated": job.updated_at
+    })
 
     payload = {
         "id": job.id,
@@ -146,11 +181,27 @@ def get_job(job_id: str):
         "steps": job.steps,
         "updated_at": job.updated_at,
     }
+    
     if job.status == "done":
+        log.info("Job completed - preparing result", extra={
+            "job_id": job_id,
+            "result_type": type(job.result).__name__
+        })
         try:
             payload["result"] = job.result.model_dump(mode="json")
-        except Exception:
+            log.info("Job result serialized successfully", extra={
+                "job_id": job_id,
+                "result_keys": list(payload["result"].keys()) if isinstance(payload["result"], dict) else "not_dict"
+            })
+        except Exception as e:
+            log.error("Failed to serialize job result", extra={"job_id": job_id, "error": str(e)})
             payload["result"] = job.result
+            
     if job.status == "error":
+        log.info("Job failed - returning error", extra={
+            "job_id": job_id,
+            "error": job.error
+        })
         payload["error"] = job.error
+        
     return JSONResponse(payload)
