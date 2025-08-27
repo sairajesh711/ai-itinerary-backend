@@ -14,16 +14,20 @@ from config import settings
 from models import ItineraryRequest, ItineraryResponse, DayPlan, Meta, WeatherSummary
 from request_context import get_request_id
 from services.calendar_service import guess_country_code
+from services.currency_service import CurrencyService
+from services.budget_annotator import annotate_budget
 
 log = logging.getLogger("llm")
 
-SYSTEM_PROMPT = """You are an expert European travel planner.
+SYSTEM_PROMPT = """You are an expert global travel planner.
 
 Return strictly VALID JSON that matches the provided JSON Schema.
 IMPORTANT:
 - The JSON ROOT MUST be the ItineraryResponse object (no wrapper keys).
 - Include every field (fill optional ones with null or empty arrays/objects).
 - No markdown, no prose. JSON only.
+- Return all activity estimated_cost values in the LOCAL CURRENCY for the destination.
+- Set the itinerary `currency` field to that local ISO code (e.g., JPY for Tokyo, GBP for London, USD for New York).
 
 Tone & personalization:
 - Write day `summary` and `tips` in second person ("you"), and reflect the user's stated interests explicitly.
@@ -33,17 +37,26 @@ Planning rules:
 - Build realistic, logistically sound day plans; cluster nearby sights; sensible travel times.
 - Include ≥3 activities per day with at least one food/coffee stop.
 - Use CALENDAR CONTEXT to adjust openings/closures and crowds.
-- Use SEASONAL CLIMATE CONTEXT to add one 'Weather tip (Month): ...' line in each day’s notes (do NOT invent a forecast).
-- Costs: For each activity, include `estimated_cost` with either {amount} OR {amount_min, amount_max}.
-- If a max_daily_budget is provided, keep the day total within ±5% of the cap, and write a 'Budget summary: ...' line in day notes (UNDER/WITHIN/OVER).
+- Use SEASONAL CLIMATE CONTEXT to add one 'Weather tip (Month): ...' line in each day's notes (do NOT invent a forecast).
+- Costs: For each activity, include `estimated_cost` with either {amount} OR {amount_min, amount_max} in LOCAL currency.
 - Public transport: respect preferred_transport. If `public_transit` is allowed, add a short, stable route hint in `travel_from_prev.notes` (e.g., "Metro Line 1 from X to Y, ~12m"). Avoid live schedules; keep it coarse but useful.
 """
 
 def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None, climate_notes: str | None = None) -> str:
     end_or_days = f"end_date: {req.end_date.isoformat()}" if req.end_date else f"duration_days: {req.duration_days}"
-    budget_line = f"max_daily_budget: {getattr(req, 'max_daily_budget', None)}"
+    
+    # Budget guidance
+    budget_guidance = ""
+    if req.max_daily_budget and req.home_currency:
+        budget_guidance = (
+            f"The traveler's approximate daily budget is ~{req.max_daily_budget} "
+            f"{req.home_currency}. Treat this as a guideline for choosing activities "
+            f"(do not solve an exact equation). "
+        )
+    
     blocks = [
         "Create a day-by-day itinerary with activities and logistics.",
+        budget_guidance,
         f"destination: {req.destination}",
         f"start_date: {req.start_date.isoformat()}",
         end_or_days,
@@ -52,14 +65,12 @@ def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None, clima
         f"budget_level: {req.budget_level}",
         f"pace: {req.pace}",
         f"preferred_transport: {', '.join(req.preferred_transport)}",
-        budget_line,
         "Constraints:",
         "- Keep transitions time-realistic across morning/afternoon/evening.",
         "- Leave booking fields null unless reasonably certain.",
-        "- Use 'estimated_cost' per activity (either amount OR min/max).",
+        "- Use 'estimated_cost' per activity (either amount OR min/max) in LOCAL currency.",
         "- Add public-transit hints in travel_from_prev.notes when appropriate.",
-        "- Add one 'Weather tip (Month): ...' line in each day’s notes based on climate, not forecast.",
-        "- Write a 'Budget summary: ...' line in each day’s notes (±5% rule).",
+        "- Add one 'Weather tip (Month): ...' line in each day's notes based on climate, not forecast.",
     ]
     if calendar_notes:
         blocks.append("\nCALENDAR CONTEXT:\n" + calendar_notes)
@@ -150,7 +161,7 @@ def _fix_time_str(val: Any) -> Any:
         return "23:59:00"
     return val
 
-def _normalize_cost_dict(obj: Any, default_currency: str = "EUR") -> Optional[Dict[str, Any]]:
+def _normalize_cost_dict(obj: Any, default_currency: str = "USD") -> Optional[Dict[str, Any]]:
     if obj is None:
         return None
     if not isinstance(obj, dict):
@@ -327,13 +338,57 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any, climate_mo
         elif "itinerary" in candidate and isinstance(candidate["itinerary"], list):
             daily_plan = candidate["itinerary"]
 
+    # Determine local currency for activities (based on destination)
     cc = guess_country_code(out["destination"]) or ""
     CC_TO_CURRENCY = {
+        # Europe
         "GB": "GBP", "IE": "EUR", "FR": "EUR", "PT": "EUR", "ES": "EUR", "DE": "EUR",
         "IT": "EUR", "NL": "EUR", "BE": "EUR", "AT": "EUR", "CH": "CHF", "DK": "DKK",
         "SE": "SEK", "NO": "NOK", "PL": "PLN", "CZ": "CZK", "HU": "HUF", "GR": "EUR",
+        "FI": "EUR", "EE": "EUR", "LV": "EUR", "LT": "EUR", "SK": "EUR", "SI": "EUR",
+        "HR": "EUR", "RO": "RON", "BG": "BGN", "RS": "RSD", "ME": "EUR", "MK": "MKD",
+        "AL": "ALL", "BA": "BAM", "MD": "MDL", "UA": "UAH", "BY": "BYN", "RU": "RUB",
+        "IS": "ISK", "TR": "TRY", "CY": "EUR", "MT": "EUR", "LU": "EUR", "MC": "EUR",
+        
+        # North America
+        "US": "USD", "CA": "CAD", "MX": "MXN", "GT": "GTQ", "BZ": "BZD", "SV": "USD",
+        "HN": "HNL", "NI": "NIO", "CR": "CRC", "PA": "PAB", "CU": "CUP", "JM": "JMD",
+        "HT": "HTG", "DO": "DOP", "PR": "USD", "BS": "BSD", "BB": "BBD", "TT": "TTD",
+        
+        # South America  
+        "BR": "BRL", "AR": "ARS", "CL": "CLP", "PE": "PEN", "CO": "COP", "VE": "VES",
+        "EC": "USD", "BO": "BOB", "PY": "PYG", "UY": "UYU", "SR": "SRD", "GY": "GYD",
+        "FK": "FKP", "GF": "EUR",
+        
+        # Asia
+        "CN": "CNY", "JP": "JPY", "KR": "KRW", "IN": "INR", "TH": "THB", "VN": "VND",
+        "PH": "PHP", "ID": "IDR", "MY": "MYR", "SG": "SGD", "HK": "HKD", "TW": "TWD",
+        "MO": "MOP", "KH": "KHR", "LA": "LAK", "MM": "MMK", "BD": "BDT", "LK": "LKR",
+        "NP": "NPR", "BT": "BTN", "MV": "MVR", "AF": "AFN", "PK": "PKR", "IR": "IRR",
+        "IQ": "IQD", "SY": "SYP", "LB": "LBP", "JO": "JOD", "IL": "ILS", "PS": "ILS",
+        "SA": "SAR", "AE": "AED", "QA": "QAR", "BH": "BHD", "KW": "KWD", "OM": "OMR",
+        "YE": "YER", "UZ": "UZS", "KZ": "KZT", "KG": "KGS", "TJ": "TJS", "TM": "TMT",
+        "MN": "MNT", "KP": "KPW",
+        
+        # Africa
+        "EG": "EGP", "LY": "LYD", "TN": "TND", "DZ": "DZD", "MA": "MAD", "SD": "SDG",
+        "SS": "SSP", "ET": "ETB", "ER": "ERN", "DJ": "DJF", "SO": "SOS", "KE": "KES",
+        "UG": "UGX", "TZ": "TZS", "RW": "RWF", "BI": "BIF", "MG": "MGA", "MU": "MUR",
+        "SC": "SCR", "KM": "KMF", "MW": "MWK", "ZM": "ZMW", "ZW": "ZWL", "BW": "BWP",
+        "NA": "NAD", "ZA": "ZAR", "LS": "LSL", "SZ": "SZL", "AO": "AOA", "MZ": "MZN",
+        "CD": "CDF", "CG": "XAF", "CF": "XAF", "CM": "XAF", "TD": "XAF", "GQ": "XAF",
+        "GA": "XAF", "ST": "STN", "GH": "GHS", "TG": "XOF", "BJ": "XOF", "NE": "XOF",
+        "BF": "XOF", "ML": "XOF", "SN": "XOF", "GN": "GNF", "SL": "SLL", "LR": "LRD",
+        "CI": "XOF", "GM": "GMD", "GW": "XOF", "CV": "CVE", "MR": "MRU", "NG": "NGN",
+        
+        # Oceania
+        "AU": "AUD", "NZ": "NZD", "FJ": "FJD", "PG": "PGK", "SB": "SBD", "VU": "VUV",
+        "NC": "XPF", "PF": "XPF", "WS": "WST", "TO": "TOP", "KI": "AUD", "TV": "AUD",
+        "NR": "AUD", "PW": "USD", "FM": "USD", "MH": "USD", "GU": "USD", "AS": "USD",
+        "MP": "USD",
     }
-    default_currency = CC_TO_CURRENCY.get(cc, "EUR")
+    local_currency = CC_TO_CURRENCY.get(cc, "USD")  # Local currency for activities
+    home_currency = req.home_currency or "USD"  # Customer's home currency for budget calculations
 
     clean_days: List[Dict[str, Any]] = []
     for i, day in enumerate(daily_plan):
@@ -349,15 +404,14 @@ def normalize_candidate_for_response(req: ItineraryRequest, raw: Any, climate_mo
         d["summary"] = day.get("summary")
         d["weather"] = day.get("weather")
         acts = day.get("activities") or day.get("plans") or []
-        d["activities"] = _sanitize_activities(acts, default_currency=default_currency)
+        d["activities"] = _sanitize_activities(acts, default_currency=local_currency)
         d["notes"] = day.get("notes") or []
         clean_days.append(d)
 
     # Inject climate-based weather + tips if missing
     _inject_weather(clean_days, climate_monthly)
 
-    # Budget guardrails
-    _apply_budget_guardrails(clean_days, getattr(req, "max_daily_budget", None), default_currency)
+    # Remove old budget guardrails - will be handled by budget annotator later
     out["daily_plan"] = clean_days
 
     if isinstance(candidate, dict) and "total_days" in candidate:
@@ -440,7 +494,7 @@ def generate_itinerary(
 
         meta_obj = itinerary.meta or Meta()
         meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
-        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "EUR"})
+        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "USD"})
 
         desired, current = itinerary.total_days, len(itinerary.daily_plan)
         if current < desired:
@@ -459,6 +513,19 @@ def generate_itinerary(
             pass
 
         p("Validation complete (structured)")
+        
+        # Apply budget annotations using currency conversion
+        try:
+            currency_svc = CurrencyService()
+            itinerary = annotate_budget(
+                itinerary,
+                home_currency=req.home_currency,
+                max_daily_budget=req.max_daily_budget,
+                currency_svc=currency_svc
+            )
+        except Exception as e:
+            log.warning("Budget annotation failed: %s", e, extra={"request_id": rid})
+        
         return itinerary
 
     except Exception as e:
@@ -486,7 +553,7 @@ def generate_itinerary(
 
         meta_obj = itinerary.meta or Meta()
         meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
-        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "EUR"})
+        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "USD"})
 
         desired, current = itinerary.total_days, len(itinerary.daily_plan)
         if current < desired:
@@ -504,6 +571,19 @@ def generate_itinerary(
             pass
 
         p("Validation complete (JSON mode)")
+        
+        # Apply budget annotations using currency conversion
+        try:
+            currency_svc = CurrencyService()
+            itinerary = annotate_budget(
+                itinerary,
+                home_currency=req.home_currency,
+                max_daily_budget=req.max_daily_budget,
+                currency_svc=currency_svc
+            )
+        except Exception as e:
+            log.warning("Budget annotation failed: %s", e, extra={"request_id": rid})
+        
         return itinerary
 
     except Exception as e:
@@ -533,7 +613,7 @@ def generate_itinerary(
 
         meta_obj = itinerary.meta or Meta()
         meta_obj = Meta.model_validate({**meta_obj.model_dump(), "generated_at_iso": datetime.now(timezone.utc).isoformat()})
-        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "EUR"})
+        itinerary = itinerary.model_copy(update={"meta": meta_obj, "currency": itinerary.currency or "USD"})
 
         desired, current = itinerary.total_days, len(itinerary.daily_plan)
         if current < desired:
@@ -550,6 +630,18 @@ def generate_itinerary(
         except Exception:
             pass
 
+        # Apply budget annotations using currency conversion
+        try:
+            currency_svc = CurrencyService()
+            itinerary = annotate_budget(
+                itinerary,
+                home_currency=req.home_currency,
+                max_daily_budget=req.max_daily_budget,
+                currency_svc=currency_svc
+            )
+        except Exception as e:
+            log.warning("Budget annotation failed: %s", e, extra={"request_id": rid})
+        
         return itinerary
 
     except Exception as e:

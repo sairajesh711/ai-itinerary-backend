@@ -91,10 +91,10 @@ climate_service = ClimateService()
 calendar_service = CalendarService()
 
 
-@app.post("/generate_itinerary", response_model=ItineraryResponse)
-def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
+def build_context_data(req: ItineraryRequest):
+    """Build calendar and climate context data for itinerary generation."""
     end_date = req.end_date or (req.start_date + timedelta(days=(req.duration_days or 1) - 1))
-
+    
     calendar_notes = calendar_service.build_calendar_context(
         destination=req.destination,
         start=req.start_date,
@@ -111,24 +111,25 @@ def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
         start=req.start_date,
         end=end_date,
     )
+    
+    return calendar_notes, climate_notes, climate_monthly
 
+
+@app.post("/generate_itinerary", response_model=ItineraryResponse)
+def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
+    calendar_notes, climate_notes, climate_monthly = build_context_data(req)
     return generate_itinerary(req, calendar_notes=calendar_notes, climate_notes=climate_notes, climate_monthly=climate_monthly)
 
 
 # --- JOB ENDPOINTS ---
 @app.post("/jobs/itinerary")
 def create_itinerary_job(req: ItineraryRequest):
-    end_date = req.end_date or (req.start_date + timedelta(days=(req.duration_days or 1) - 1))
-    calendar_notes = calendar_service.build_calendar_context(
-        destination=req.destination,
-        start=req.start_date,
-        end=end_date,
-        country_code_hint=None,
-    )
-
+    calendar_notes, climate_notes, climate_monthly = build_context_data(req)
+    
     job = manager.create(
         target=generate_itinerary,
-        kwargs={"req": req, "calendar_notes": calendar_notes},
+        kwargs={"req": req, "calendar_notes": calendar_notes, 
+                "climate_notes": climate_notes, "climate_monthly": climate_monthly},
     )
     return {"job_id": job.id, "status": job.status}
 

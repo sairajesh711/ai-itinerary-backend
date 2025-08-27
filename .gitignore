@@ -95,3 +95,11 @@ logs/
 
 # Misc
 site/
+
+# Debug files
+*_debug.json
+schema_debug.json
+strict_schema_debug.json
+
+# Node modules (should not be in Python backend)
+node_modules/

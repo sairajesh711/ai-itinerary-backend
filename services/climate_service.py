@@ -38,7 +38,9 @@ class ClimateService:
     def __init__(self, timeout: float = 10.0) -> None:
         self._client = httpx.Client(timeout=timeout, headers={"User-Agent": "ai-travel-planner/phase1"})
 
+    @functools.lru_cache(maxsize=256)
     def _geocode(self, destination: str) -> Optional[GeoPoint]:
+        """Geocode destination to lat/lon. Cached to avoid duplicate API calls."""
         try:
             r = self._client.get(_GEOCODE_URL, params={"name": destination, "count": 1, "language": "en", "format": "json"})
             r.raise_for_status()

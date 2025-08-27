@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, time
 from typing import List, Literal, Optional
 from pydantic import (
@@ -14,6 +15,8 @@ from pydantic import (
     AliasChoices,
 )
 
+CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
 # -----------------------------
 # Shared atoms
 # -----------------------------
@@ -21,7 +24,7 @@ from pydantic import (
 class MoneyEstimate(BaseModel):
     """Cost range for an item/activity. Also supports coercion from a simple 'amount'."""
     model_config = ConfigDict(extra="forbid")
-    currency: str = Field(default="EUR", description="ISO currency code, e.g. 'EUR', 'GBP'")
+    currency: str = Field(default="USD", description="ISO currency code, e.g. 'USD', 'EUR', 'GBP'")
     amount_min: Optional[confloat(ge=0)] = Field(default=None)
     amount_max: Optional[confloat(ge=0)] = Field(default=None)
     notes: Optional[str] = None
@@ -81,6 +84,11 @@ class ItineraryRequest(BaseModel):
     max_daily_budget: Optional[conint(ge=0)] = Field(
         default=None, description="Max spend per day; keep under this cap."
     )
+    
+    # NEW: home currency for budget calculations
+    home_currency: Optional[str] = Field(
+        default=None, description="ISO currency code (e.g., 'USD', 'GBP') for user's daily budget cap. Used for budget guardrail calculations."
+    )
 
     @model_validator(mode="after")
     def _validate_dates(self) -> "ItineraryRequest":
@@ -93,6 +101,15 @@ class ItineraryRequest(BaseModel):
         if self.end_date and self.end_date < self.start_date:
             raise ValueError("end_date cannot be before start_date.")
         return self
+
+    @field_validator("home_currency")
+    @classmethod
+    def _validate_currency(cls, v):
+        if v is None:
+            return v
+        if not CURRENCY_RE.match(v):
+            raise ValueError("home_currency must be a 3-letter ISO code (e.g. USD, GBP, EUR)")
+        return v
 
 # -----------------------------
 # Response
@@ -145,7 +162,7 @@ class Activity(BaseModel):
         if isinstance(v, dict) and "amount" in v:
             amt = v.get("amount")
             return {
-                "currency": v.get("currency") or "EUR",
+                "currency": v.get("currency") or "USD",
                 "amount_min": amt,
                 "amount_max": amt,
                 "notes": v.get("notes"),
@@ -211,7 +228,7 @@ class ItineraryResponse(BaseModel):
     end_date: date
     total_days: conint(ge=1)
     timezone: Optional[str] = None
-    currency: str = "EUR"
+    currency: str = "USD"
 
     travelers_count: Optional[conint(ge=1, le=12)] = 1
     interests: List[str] = Field(default_factory=list)

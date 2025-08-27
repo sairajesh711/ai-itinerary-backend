@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # --- OpenAI / app defaults ---
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
-    DEFAULT_CURRENCY: str = "EUR"
+    DEFAULT_CURRENCY: str = "USD"
 
     # --- CORS (env-driven) ---
     CORS_ALLOW_ORIGINS: List[str] = Field(
