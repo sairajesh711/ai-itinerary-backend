@@ -110,6 +110,20 @@ class ItineraryRequest(BaseModel):
         if not CURRENCY_RE.match(v):
             raise ValueError("home_currency must be a 3-letter ISO code (e.g. USD, GBP, EUR)")
         return v
+    
+    @field_validator("destination")
+    @classmethod
+    def _validate_destination(cls, v):
+        """Validate destination for security."""
+        from security import validate_destination
+        return validate_destination(v)
+    
+    @field_validator("interests")
+    @classmethod
+    def _validate_interests(cls, v):
+        """Validate interests for security."""
+        from security import validate_interests
+        return validate_interests(v)
 
 # -----------------------------
 # Response

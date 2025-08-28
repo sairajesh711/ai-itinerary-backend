@@ -9,7 +9,7 @@ from services.climate_service import ClimateService
 from datetime import timedelta
 
 
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from jobs import manager
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,15 @@ from models import ItineraryRequest, ItineraryResponse
 from request_context import new_request_id, get_request_id
 from services.calendar_service import CalendarService
 from services.openai_service import generate_itinerary
+from security import (
+    SecurityValidator, 
+    security_headers_middleware, 
+    rate_limit,
+    validate_destination,
+    validate_interests,
+    detect_prompt_injection,
+    detect_encoded_injection
+)
 
 # Initialize logging BEFORE creating the app
 setup_logging()
@@ -52,6 +61,9 @@ app.add_middleware(
     max_age=settings.CORS_MAX_AGE,
 )
 
+# Add security headers middleware
+app.middleware("http")(security_headers_middleware())
+
 
 
 @app.middleware("http")
@@ -59,6 +71,26 @@ async def request_logging_mw(request: Request, call_next):
     rid = new_request_id()
     start = time.perf_counter()
     response: Response | None = None
+    
+    # Security: Check request size for POST/PUT requests
+    if request.method in ["POST", "PUT", "PATCH"]:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                size = int(content_length)
+                SecurityValidator.validate_request_size(size, max_size=1024 * 50)  # 50KB limit
+            except (ValueError, HTTPException) as e:
+                if isinstance(e, HTTPException):
+                    log.warning("Request size validation failed", extra={
+                        "request_id": rid,
+                        "size": size if 'size' in locals() else "unknown",
+                        "client_ip": request.client.host if request.client else "unknown"
+                    })
+                    return JSONResponse(
+                        status_code=e.status_code,
+                        content={"detail": e.detail}
+                    )
+    
     try:
         response = await call_next(request)
         return response
@@ -127,7 +159,39 @@ def generate_itinerary_endpoint(req: ItineraryRequest) -> ItineraryResponse:
 
 # --- JOB ENDPOINTS ---
 @app.post("/jobs/itinerary")
-def create_itinerary_job(req: ItineraryRequest):
+async def create_itinerary_job(req: ItineraryRequest, request: Request):
+    # Rate limiting check
+    client_ip = (
+        request.headers.get("x-forwarded-for", "").split(",")[0].strip() or
+        request.headers.get("x-real-ip") or
+        request.client.host if request.client else "unknown"
+    )
+    
+    current_time = time.time()
+    
+    # Simple in-memory rate limiting (better to use Redis in production)
+    import collections
+    if not hasattr(create_itinerary_job, '_rate_limits'):
+        create_itinerary_job._rate_limits = collections.defaultdict(collections.deque)
+    
+    client_requests = create_itinerary_job._rate_limits[f"jobs_{client_ip}"]
+    
+    # Remove old requests (5 minute window)
+    while client_requests and client_requests[0] < current_time - 300:
+        client_requests.popleft()
+    
+    # Check rate limit (5 requests per 5 minutes)
+    if len(client_requests) >= 5:
+        log.warning("Rate limit exceeded for job creation", extra={
+            "client_ip": client_ip,
+            "requests_count": len(client_requests)
+        })
+        raise HTTPException(
+            status_code=429, 
+            detail="Rate limit exceeded. Maximum 5 job requests per 5 minutes."
+        )
+    
+    client_requests.append(current_time)
     log.info("Itinerary job request received", extra={
         "destination": req.destination,
         "start_date": str(req.start_date),

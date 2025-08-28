@@ -454,6 +454,25 @@ def generate_itinerary(
     if not settings.OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API key not configured.")
 
+    # Security: Additional validation for prompt injection in context data
+    from security import detect_prompt_injection, detect_encoded_injection
+    
+    # Check calendar and climate notes for injection attempts
+    for notes, name in [(calendar_notes, "calendar"), (climate_notes, "climate")]:
+        if notes:
+            is_suspicious, patterns = detect_prompt_injection(notes)
+            if is_suspicious or detect_encoded_injection(notes):
+                log.error(f"Suspicious {name} notes detected", extra={
+                    "patterns": patterns,
+                    "destination": req.destination
+                })
+                # Rather than failing, we'll sanitize by removing the suspicious notes
+                if name == "calendar":
+                    calendar_notes = None
+                else:
+                    climate_notes = None
+                log.info(f"Removed suspicious {name} notes for safety")
+
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
     strict_schema = build_openai_strict_schema()
     rid = get_request_id()
