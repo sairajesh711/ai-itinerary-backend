@@ -24,9 +24,34 @@ class Settings(BaseSettings):
     )
 
     # --- OpenAI / app defaults ---
-    OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-4o-mini"
-    DEFAULT_CURRENCY: str = "USD"
+    OPENAI_API_KEY: str = Field(
+        default="",
+        validation_alias=AliasChoices("OPENAI_API_KEY", "openai_api_key"),
+    )
+    OPENAI_MODEL: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("OPENAI_MODEL", "openai_model"),
+    )
+    DEFAULT_CURRENCY: str = Field(
+        default="USD",
+        validation_alias=AliasChoices("DEFAULT_CURRENCY", "default_currency"),
+    )
+    
+    # --- Server Settings (for deployment) ---
+    PORT: int = Field(
+        default=8000,
+        validation_alias=AliasChoices("PORT", "port"),
+    )
+    HOST: str = Field(
+        default="0.0.0.0",
+        validation_alias=AliasChoices("HOST", "host"),
+    )
+    
+    # --- Logging ---
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        validation_alias=AliasChoices("LOG_LEVEL", "log_level"),
+    )
 
     # --- CORS (env-driven) ---
     CORS_ALLOW_ORIGINS: List[str] = Field(
@@ -66,6 +91,33 @@ class Settings(BaseSettings):
             parts = [p.strip() for p in self.FRONTEND_ORIGINS.split(",") if p.strip()]
             if parts:
                 self.CORS_ALLOW_ORIGINS = parts
+        return self
+    
+    @model_validator(mode="after")
+    def _validate_production_settings(self) -> "Settings":
+        """Validate critical settings for production deployment."""
+        if self.APP_ENV == "production":
+            # Check for placeholder API key
+            if not self.OPENAI_API_KEY or self.OPENAI_API_KEY in [
+                "", 
+                "your-openai-api-key-here",
+                "sk-proj-YOUR_ACTUAL_OPENAI_API_KEY_HERE"
+            ]:
+                raise ValueError(
+                    "OPENAI_API_KEY must be set to a valid key in production. "
+                    "Get your key from https://platform.openai.com/api-keys"
+                )
+            
+            # Ensure production CORS origins don't include localhost
+            localhost_origins = [origin for origin in self.CORS_ALLOW_ORIGINS 
+                               if "localhost" in origin or "127.0.0.1" in origin]
+            if localhost_origins:
+                import logging
+                logging.getLogger("config").warning(
+                    f"Production environment includes localhost CORS origins: {localhost_origins}. "
+                    "Consider removing these for production deployment."
+                )
+        
         return self
 
     @property

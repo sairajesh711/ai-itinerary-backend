@@ -126,6 +126,19 @@ def debug_cors():
 climate_service = ClimateService()
 calendar_service = CalendarService()
 
+# Production startup logging
+log.info("AI Itinerary Backend starting", extra={
+    "environment": settings.APP_ENV,
+    "debug_mode": settings.DEBUG,
+    "host": getattr(settings, "HOST", "0.0.0.0"),
+    "port": getattr(settings, "PORT", 8000),
+    "cors_origins_count": len(settings.CORS_ALLOW_ORIGINS),
+    "openai_model": settings.OPENAI_MODEL,
+    "default_currency": settings.DEFAULT_CURRENCY,
+    "security_features": "enabled",
+    "rate_limiting": "active",
+})
+
 
 def build_context_data(req: ItineraryRequest):
     """Build calendar and climate context data for itinerary generation."""
@@ -269,3 +282,23 @@ def get_job(job_id: str):
         payload["error"] = job.error
         
     return JSONResponse(payload)
+
+# Production entry point
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    
+    # Get port from environment (Render sets $PORT)
+    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    
+    log.info(f"Starting server on {host}:{port}")
+    
+    uvicorn.run(
+        "main:app",
+        host=host,
+        port=port,
+        workers=1,
+        access_log=True,
+        log_level="info" if settings.APP_ENV == "production" else "debug"
+    )

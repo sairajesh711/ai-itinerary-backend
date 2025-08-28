@@ -1,9 +1,14 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
+# Production-ready dependencies with version pinning for stability
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
 openai>=1.82.0
-python-dotenv
-PyYAML
-httpx
-requests
+python-dotenv==1.0.0
+PyYAML==6.0.1
+httpx==0.25.2
+requests==2.31.0
+
+# Additional production dependencies
+gunicorn==21.2.0  # Alternative ASGI server for production
+python-multipart==0.0.6  # For form data handling

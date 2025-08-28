@@ -1,0 +1,43 @@
+# Render Blueprint for automatic deployment
+services:
+  - type: web
+    name: ai-itinerary-backend
+    env: python
+    plan: starter  # Upgrade to standard/pro for production load
+    region: oregon  # Choose region closest to your users
+    buildCommand: |
+      pip install --upgrade pip &&
+      pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: false
+      - key: HOST
+        value: 0.0.0.0
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # CRITICAL: Set these in Render Dashboard > Environment
+      - key: OPENAI_API_KEY
+        sync: false  # Must be set manually with your actual API key
+      - key: FRONTEND_ORIGINS
+        sync: false  # Set to your frontend domain: https://yourdomain.com
+      # Application settings
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: DEFAULT_CURRENCY
+        value: USD
+      - key: LOG_LEVEL
+        value: INFO
+      # Security settings
+      - key: SECURITY_ENABLED
+        value: true
+      - key: MAX_REQUEST_SIZE_KB
+        value: 50
+      - key: RATE_LIMIT_REQUESTS
+        value: 15  # Higher for production
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: 300
+    healthCheckPath: /health
+    autoDeploy: true
