@@ -73,7 +73,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ALLOW_METHODS", "cors_allow_methods"),
     )
     CORS_ALLOW_HEADERS: List[str] = Field(
-        default_factory=lambda: ["Content-Type", "Authorization", "X-Request-Id"],
+        default_factory=lambda: [
+            "Accept", 
+            "Accept-Language", 
+            "Authorization", 
+            "Content-Language", 
+            "Content-Type", 
+            "X-Request-Id",
+            "Cache-Control",
+            "Pragma",
+            "Expires"
+        ],
         validation_alias=AliasChoices("CORS_ALLOW_HEADERS", "cors_allow_headers"),
     )
     CORS_EXPOSE_HEADERS: List[str] = Field(
