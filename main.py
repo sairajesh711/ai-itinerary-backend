@@ -72,24 +72,26 @@ async def request_logging_mw(request: Request, call_next):
     start = time.perf_counter()
     response: Response | None = None
     
-    # Security: Check request size for POST/PUT requests
-    if request.method in ["POST", "PUT", "PATCH"]:
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                size = int(content_length)
-                SecurityValidator.validate_request_size(size, max_size=1024 * 50)  # 50KB limit
-            except (ValueError, HTTPException) as e:
-                if isinstance(e, HTTPException):
-                    log.warning("Request size validation failed", extra={
-                        "request_id": rid,
-                        "size": size if 'size' in locals() else "unknown",
-                        "client_ip": request.client.host if request.client else "unknown"
-                    })
-                    return JSONResponse(
-                        status_code=e.status_code,
-                        content={"detail": e.detail}
-                    )
+    # Skip security checks for OPTIONS requests (CORS preflight)
+    if request.method != "OPTIONS":
+        # Security: Check request size for POST/PUT requests
+        if request.method in ["POST", "PUT", "PATCH"]:
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    size = int(content_length)
+                    SecurityValidator.validate_request_size(size, max_size=1024 * 50)  # 50KB limit
+                except (ValueError, HTTPException) as e:
+                    if isinstance(e, HTTPException):
+                        log.warning("Request size validation failed", extra={
+                            "request_id": rid,
+                            "size": size if 'size' in locals() else "unknown",
+                            "client_ip": request.client.host if request.client else "unknown"
+                        })
+                        return JSONResponse(
+                            status_code=e.status_code,
+                            content={"detail": e.detail}
+                        )
     
     try:
         response = await call_next(request)
