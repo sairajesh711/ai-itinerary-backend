@@ -19,64 +19,82 @@ from services.budget_annotator import annotate_budget
 
 log = logging.getLogger("llm")
 
-SYSTEM_PROMPT = """You are an expert global travel planner.
+SYSTEM_PROMPT = """You are ATLAS, expert travel architect. Craft authentic, locally-immersive itineraries.
 
-Return strictly VALID JSON that matches the provided JSON Schema.
-IMPORTANT:
-- The JSON ROOT MUST be the ItineraryResponse object (no wrapper keys).
-- Include every field (fill optional ones with null or empty arrays/objects).
-- No markdown, no prose. JSON only.
-- Return all activity estimated_cost values in the LOCAL CURRENCY for the destination.
-- Set the itinerary `currency` field to that local ISO code (e.g., JPY for Tokyo, GBP for London, USD for New York).
+## OUTPUT
+Return VALID JSON (ItineraryResponse schema):
+- Root: ItineraryResponse (no wrappers)
+- All fields required (null for empty optionals)  
+- JSON only, no markdown
+- Costs in LOCAL currency (JPY/GBP/USD/etc)
 
-Tone & personalization:
-- Write day `summary` and `tips` in second person ("you"), and reflect the user's stated interests explicitly.
-- Avoid generic phrases; mention the actual neighborhood, venue, or interest.
+## CORE PRINCIPLES
+1. **Authentic over touristy** - Local gems, not traps
+2. **Narrative flow** - Days tell stories
+3. **Regional thinking** - Beyond city limits for 4+ days
+4. **Cultural depth** - Local food, customs, neighborhoods
+5. **Strategic hubs** - Optimize bases for 6+ days
 
-Planning rules:
-- Build realistic, logistically sound day plans; cluster nearby sights; sensible travel times.
-- Include ≥3 activities per day with at least one food/coffee stop.
-- Use CALENDAR CONTEXT to adjust openings/closures and crowds.
-- Use SEASONAL CLIMATE CONTEXT to add one 'Weather tip (Month): ...' line in each day's notes (do NOT invent a forecast).
-- Costs: For each activity, include `estimated_cost` with either {amount} OR {amount_min, amount_max} in LOCAL currency.
-- Public transport: respect preferred_transport. If `public_transit` is allowed, add a short, stable route hint in `travel_from_prev.notes` (e.g., "Metro Line 1 from X to Y, ~12m"). Avoid live schedules; keep it coarse but useful.
-"""
+## REGIONAL LOGIC
+**4+ days**: Evaluate day trips (2-3hr accessible, significant destinations, unique experiences)
+**6+ days**: Consider hub switches if nearby city offers better transport/cost/positioning
+
+Examples: Barcelona→Girona hub for Costa Brava; Paris→Reims for Champagne
+
+## EXECUTION
+- Write "you will..." (2nd person)
+- ≥3 activities/day (include food)
+- Realistic timing, cluster locations
+- Transport hints for public transit
+- Weather tips from CLIMATE context
+- Respect CALENDAR closures/crowds
+- Justify hub changes in day notes
+
+## NO BLAND DAYS
+Unless pace="relaxed", every day needs memorable experiences:
+Skills (cooking/martial arts/crafts), food adventures (markets/tastings), cultural immersion (ceremonies/festivals), unique local activities (Muay Thai/tango/hammam).
+
+Examples: Thai cooking→Muay Thai match→floating market; Paris wine tasting→cheese-making→Le Marais vintage hunt
+
+Craft memories like a trusted local friend."""
 
 def _user_prompt(req: ItineraryRequest, calendar_notes: str | None = None, climate_notes: str | None = None) -> str:
-    end_or_days = f"end_date: {req.end_date.isoformat()}" if req.end_date else f"duration_days: {req.duration_days}"
+    """Generate lean data memo for ATLAS."""
     
-    # Budget guidance
-    budget_guidance = ""
-    if req.max_daily_budget and req.home_currency:
-        budget_guidance = (
-            f"The traveler's approximate daily budget is ~{req.max_daily_budget} "
-            f"{req.home_currency}. Treat this as a guideline for choosing activities "
-            f"(do not solve an exact equation). "
-        )
+    total_days = (req.end_date - req.start_date).days + 1 if req.end_date else req.duration_days
+    end_date = req.end_date.isoformat() if req.end_date else (req.start_date + timedelta(days=(req.duration_days or 1) - 1)).isoformat()
     
-    blocks = [
-        "Create a day-by-day itinerary with activities and logistics.",
-        budget_guidance,
-        f"destination: {req.destination}",
-        f"start_date: {req.start_date.isoformat()}",
-        end_or_days,
-        f"interests: {', '.join(req.interests) if req.interests else 'none'}",
-        f"travelers_count: {req.travelers_count}",
-        f"budget_level: {req.budget_level}",
-        f"pace: {req.pace}",
-        f"preferred_transport: {', '.join(req.preferred_transport)}",
-        "Constraints:",
-        "- Keep transitions time-realistic across morning/afternoon/evening.",
-        "- Leave booking fields null unless reasonably certain.",
-        "- Use 'estimated_cost' per activity (either amount OR min/max) in LOCAL currency.",
-        "- Add public-transit hints in travel_from_prev.notes when appropriate.",
-        "- Add one 'Weather tip (Month): ...' line in each day's notes based on climate, not forecast.",
+    # Core data block
+    sections = [
+        f"DESTINATION: {req.destination}",
+        f"DATES: {req.start_date.isoformat()} to {end_date} ({total_days} days)",
+        f"TRAVELERS: {req.travelers_count}",
+        f"INTERESTS: {', '.join(req.interests) if req.interests else 'general'}",
+        f"BUDGET: {req.budget_level}",
+        f"PACE: {req.pace}",
+        f"TRANSPORT: {', '.join(req.preferred_transport)}",
     ]
+    
+    # Optional budget
+    if req.max_daily_budget and req.home_currency:
+        sections.append(f"DAILY_BUDGET: ~{req.max_daily_budget} {req.home_currency}")
+    
+    # Regional planning flag
+    if total_days >= 4:
+        sections.append(f"REGIONAL_EVAL: {total_days}-day trip - consider day trips/hub optimization")
+    
+    # Anti-bland enforcement
+    if req.pace != "relaxed":
+        sections.append("EXCITEMENT_MANDATE: No bland/generic days - include novel skills, unique food, cultural immersion")
+    
+    # Context blocks
     if calendar_notes:
-        blocks.append("\nCALENDAR CONTEXT:\n" + calendar_notes)
+        sections.extend(["", "CALENDAR:", calendar_notes])
+    
     if climate_notes:
-        blocks.append("\nSEASONAL CLIMATE CONTEXT:\n" + climate_notes)
-    return "\n".join(blocks)
+        sections.extend(["", "CLIMATE:", climate_notes])
+    
+    return "\n".join(sections)
 
 def _strip_code_fences(s: str | None) -> str:
     if not s:
