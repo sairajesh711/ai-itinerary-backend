@@ -1,0 +1,76 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: ai-itinerary-backend
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/execution-environment: gen2
+spec:
+  template:
+    metadata:
+      annotations:
+        # Cost optimization: scale to zero when idle
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        # CPU allocation only during requests (saves cost)
+        run.googleapis.com/cpu-throttling: "true"
+        # Memory and CPU settings
+        run.googleapis.com/memory: "512Mi"
+        run.googleapis.com/cpu: "1000m"
+    spec:
+      containerConcurrency: 100
+      timeoutSeconds: 300
+      containers:
+      - image: gcr.io/PROJECT_ID/ai-itinerary-backend
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PORT
+          value: "8000"
+        - name: APP_ENV
+          value: "production"
+        - name: DEBUG
+          value: "false"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: OPENAI_MODEL
+          value: "gpt-4o"
+        - name: DEFAULT_CURRENCY
+          value: "USD"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: SECURITY_ENABLED
+          value: "true"
+        - name: MAX_REQUEST_SIZE_KB
+          value: "50"
+        - name: RATE_LIMIT_REQUESTS
+          value: "15"
+        - name: RATE_LIMIT_WINDOW_SECONDS
+          value: "300"
+        # Secret environment variables (set via gcloud)
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-api-key
+              key: key
+        - name: FRONTEND_ORIGINS
+          valueFrom:
+            secretKeyRef:
+              name: frontend-origins
+              key: origins
+        resources:
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10

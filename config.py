@@ -29,7 +29,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("OPENAI_API_KEY", "openai_api_key"),
     )
     OPENAI_MODEL: str = Field(
-        default="gpt-4o-mini",
+        default="gpt-4o",
         validation_alias=AliasChoices("OPENAI_MODEL", "openai_model"),
     )
     DEFAULT_CURRENCY: str = Field(
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORS_ALLOW_METHODS", "cors_allow_methods"),
     )
     CORS_ALLOW_HEADERS: List[str] = Field(
-        default_factory=lambda: ["Content-Type", "Authorization"],
+        default_factory=lambda: ["Content-Type", "Authorization", "X-Request-Id"],
         validation_alias=AliasChoices("CORS_ALLOW_HEADERS", "cors_allow_headers"),
     )
     CORS_EXPOSE_HEADERS: List[str] = Field(

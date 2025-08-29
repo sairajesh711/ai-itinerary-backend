@@ -103,3 +103,6 @@ strict_schema_debug.json
 
 # Node modules (should not be in Python backend)
 node_modules/
+
+# Cloud deployment scripts with sensitive data
+setup-secrets-quick.sh

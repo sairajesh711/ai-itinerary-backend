@@ -25,7 +25,7 @@ services:
         sync: false  # Set to your frontend domain: https://yourdomain.com
       # Application settings
       - key: OPENAI_MODEL
-        value: gpt-4o-mini
+        value: gpt-4o
       - key: DEFAULT_CURRENCY
         value: USD
       - key: LOG_LEVEL
