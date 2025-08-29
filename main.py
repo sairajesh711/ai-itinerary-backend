@@ -51,6 +51,60 @@ async def on_startup():
         "debug": getattr(settings, "debug", False),
     })
 
+# Custom CORS middleware for pattern matching
+@app.middleware("http")
+async def custom_cors_middleware(request: Request, call_next):
+    import re
+    
+    origin = request.headers.get("origin")
+    
+    if origin:
+        # Check exact matches first
+        allowed = origin in settings.CORS_ALLOW_ORIGINS
+        
+        # If not exact match, check patterns
+        if not allowed and hasattr(settings, 'CORS_ORIGIN_PATTERNS'):
+            for pattern in settings.CORS_ORIGIN_PATTERNS:
+                if re.match(pattern, origin):
+                    allowed = True
+                    break
+        
+        # Handle preflight requests
+        if request.method == "OPTIONS" and allowed:
+            headers = {
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": ", ".join(settings.CORS_ALLOW_METHODS),
+                "Access-Control-Allow-Headers": ", ".join(settings.CORS_ALLOW_HEADERS),
+                "Access-Control-Max-Age": str(settings.CORS_MAX_AGE),
+                "Vary": "Origin",
+            }
+            if settings.CORS_ALLOW_CREDENTIALS:
+                headers["Access-Control-Allow-Credentials"] = "true"
+            
+            return Response(status_code=200, headers=headers)
+    
+    # Process the request
+    response = await call_next(request)
+    
+    # Add CORS headers to response if origin is allowed
+    if origin:
+        allowed = origin in settings.CORS_ALLOW_ORIGINS
+        if not allowed and hasattr(settings, 'CORS_ORIGIN_PATTERNS'):
+            for pattern in settings.CORS_ORIGIN_PATTERNS:
+                if re.match(pattern, origin):
+                    allowed = True
+                    break
+        
+        if allowed:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Expose-Headers"] = ", ".join(settings.CORS_EXPOSE_HEADERS)
+            response.headers["Vary"] = "Origin"
+            if settings.CORS_ALLOW_CREDENTIALS:
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+    
+    return response
+
+# Fallback CORS for exact matches
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ALLOW_ORIGINS,

@@ -55,8 +55,34 @@ class Settings(BaseSettings):
 
     # --- CORS (env-driven) ---
     CORS_ALLOW_ORIGINS: List[str] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://localhost:5174"],
+        default_factory=lambda: [
+            # Local development - common ports
+            "http://localhost:3000",
+            "http://localhost:3001", 
+            "http://localhost:5173", 
+            "http://localhost:5174",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+            "http://127.0.0.1:5173", 
+            "http://127.0.0.1:5174",
+            "http://127.0.0.1:8080",
+        ],
         validation_alias=AliasChoices("CORS_ALLOW_ORIGINS", "cors_allow_origins"),
+    )
+    
+    # More flexible origins using regex patterns (handled in middleware)
+    CORS_ORIGIN_PATTERNS: List[str] = Field(
+        default_factory=lambda: [
+            # Vercel deployments for your project
+            r"https://.*\.vercel\.app",
+            r"https://ai-itinerary-frontend.*\.vercel\.app",
+            # GitHub Pages
+            r"https://.*\.github\.io", 
+            # Netlify
+            r"https://.*\.netlify\.app",
+        ],
+        validation_alias=AliasChoices("CORS_ORIGIN_PATTERNS", "cors_origin_patterns"),
     )
     # Optional comma-separated alternative that overrides the above
     FRONTEND_ORIGINS: Optional[str] = Field(
@@ -74,15 +100,43 @@ class Settings(BaseSettings):
     )
     CORS_ALLOW_HEADERS: List[str] = Field(
         default_factory=lambda: [
+            # Standard headers
             "Accept", 
+            "Accept-Encoding",
             "Accept-Language", 
             "Authorization", 
             "Content-Language", 
-            "Content-Type", 
-            "X-Request-Id",
+            "Content-Type",
+            "Content-Length",
+            
+            # Cache control
             "Cache-Control",
             "Pragma",
-            "Expires"
+            "Expires",
+            "If-Modified-Since",
+            "If-None-Match",
+            
+            # Browser security headers
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode", 
+            "Sec-Fetch-Site",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            
+            # Custom headers
+            "X-Request-Id",
+            "X-Requested-With",
+            "X-API-Key",
+            
+            # Common framework headers
+            "Origin",
+            "Referer",
+            "User-Agent",
+            
+            # Range requests
+            "Range",
+            "If-Range"
         ],
         validation_alias=AliasChoices("CORS_ALLOW_HEADERS", "cors_allow_headers"),
     )

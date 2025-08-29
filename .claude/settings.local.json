@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./deploy.sh)"
+      "Bash(./deploy.sh)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []
